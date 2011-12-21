@@ -5,14 +5,21 @@ import time
 import datetime
 import functools
 
-REDIS_DATABASE = {
-    'host': 'localhost',
-    'port': 6379,
-    'db': 0,
-    'password': ''
-}
-REDIS_PREFIX = 'tf'
-r = redis.StrictRedis(**REDIS_DATABASE)
+from . import config
+
+try:
+    import odisconfig
+    for attr in dir(config):
+        if attr.startswith('__'):
+            continue
+        try:
+            setattr(config, attr, getattr(odisconfig, attr))
+        except AttributeError:
+            pass
+except ImportError:
+    pass
+
+r = redis.StrictRedis(**config.REDIS_DATABASE)
 
 EMPTY_VALUES = (None, '', [], (), {})
 
@@ -124,7 +131,7 @@ class BaseModel(type):
         super(BaseModel, cls).__init__(name, bases, attrs)
         cls._options = dict(
             name=name.lower(),
-            prefix=REDIS_PREFIX)
+            prefix=config.REDIS_PREFIX)
         fmts = {
             'pk': '_pk',
             'obj' : ':{pk}',

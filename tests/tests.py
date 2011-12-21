@@ -1,7 +1,11 @@
 import unittest
 import datetime
+import sys
+import os
 
-from models import Model, Field, DateTimeField, r, SortedSet, EmptyError
+from odis import Model, Field, DateTimeField, r, SortedSet, EmptyError
+
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
 class Foo(Model):
     username = Field(index=True, lookup=True)
