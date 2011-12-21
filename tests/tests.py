@@ -95,11 +95,3 @@ class TypeTestCase(unittest.TestCase):
 
         for i, k in enumerate(ss):
             self.assertEquals(int(k), i+1)
-
-def main():
-    """Runs the testsuite as command line application."""
-    suite1 = unittest.TestLoader().loadTestsFromTestCase(ModelsTestCase)
-    suite2 = unittest.TestLoader().loadTestsFromTestCase(TypeTestCase)
-    suite3 = unittest.TestLoader().loadTestsFromTestCase(ManagerTestCase)
-    suite = unittest.TestSuite([suite1, suite2, suite3])
-    unittest.TextTestRunner(verbosity=3).run(suite)
