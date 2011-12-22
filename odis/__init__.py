@@ -125,10 +125,7 @@ class BaseModel(type):
         # nil is set to True as this value is guaranteed
         # to be added on save.
         attrs['pk'] = IntegerField(index=True, nil=True)
-        return type.__new__(meta, name, bases, attrs)
-
-    def __init__(cls, name, bases, attrs):
-        super(BaseModel, cls).__init__(name, bases, attrs)
+        cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._options = dict(
             name=name.lower(),
             prefix=config.REDIS_PREFIX)
@@ -156,6 +153,7 @@ class BaseModel(type):
                     cls._lookup.append(k)
 
         cls.obj = Manager(cls)
+        return cls
 
 class Model(object):
     __metaclass__ = BaseModel
@@ -218,6 +216,7 @@ class Model(object):
 
             if v is None:
                 continue
+
             if int(v) != self.pk:
                 self._errors[k] = ValidationError('%s `%s` not unique' % (k, data[k])).message
 
@@ -232,7 +231,6 @@ class Model(object):
             self.pk = self._incr_pk()
 
         data = self.as_dict(to_db=True)
-
         p = r.pipeline()
         p.hmset(self.key('obj', pk=self.pk), data)
 
@@ -281,7 +279,6 @@ class Collection(object):
     '''Create a collection object saved in Redis.
     `key` the redis key for collection.
     `db` or `pipe` must be provided'''
-
     def __init__(self, key, db=None, pipe=None):
         self.db = pipe or db
 
