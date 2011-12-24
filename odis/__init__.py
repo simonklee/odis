@@ -279,11 +279,11 @@ class Set(Collection):
         return self.sismember(value)
 
     def __repr__(self):
-        return "<%s %s('%s' %s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
+        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
 
     def find(self, **kwargs):
         # seperate input
-        keys = self.keys(kwargs)
+        keys = [self.key] + self.keys(kwargs)
         target = '~' + '+'.join(keys)
 
         # then do a sinterstore
@@ -301,7 +301,14 @@ class Set(Collection):
 
 class Index(Set):
     def find(self, **kwargs):
-        pass
+        keys = self.keys(kwargs)
+
+        if len(keys) == 0:
+            return self
+        elif len(keys) > 1:
+            return super(Index, self).find(**kwargs)
+        else:
+            return Set(self.model, keys[0], db=self.db)
 
 class SortedSet(Collection):
     def __getitem__(self, s):
