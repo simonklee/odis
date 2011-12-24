@@ -4,4 +4,4 @@ REDIS_DATABASE = {
     'db': 1,
     'password': ''
 }
-REDIS_PREFIX = 'tf'
+REDIS_PREFIX = ''

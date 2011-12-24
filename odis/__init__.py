@@ -33,18 +33,15 @@ class EmptyError(Exception):
     'An error raised on validation'
 
 class Field(object):
-    def __init__(self, index=False, lookup=False, unique=False, nil=False):
+    def __init__(self, index=False, unique=False, nil=False, default=None):
         '''An attribute field on a model.
 
-        `index`: if set the value is used a score sorted set where `pk`
-        is the value. Only numeric.
-
-        `lookup`: if set an additional key is created which maps to
-        `pk`. This makes it possible to find pk by this field attribute.
-        A field which has lookup set to true is guaranteed to be unique'''
-        self.index = index
-        self.lookup = lookup or unique
+        `index`: if set the value is used create an additional key which maps to
+        `pk`. This makes it possible to find pk by this field attribute.'''
+        self.unique = unique
+        self.index = index or unique
         self.nil = nil
+        self.default = default
 
     def __set__(self, instance, value):
         return setattr(instance, '_' + self.name, value)
@@ -121,25 +118,21 @@ class Manager(object):
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
-        # pk is magic and always added to all models.
-        # nil is set to True as this value is guaranteed
-        # to be added on save.
-        attrs['pk'] = IntegerField(index=True, nil=True)
+        attrs['pk'] = IntegerField(nil=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
-        cls._options = dict(
-            name=name.lower(),
-            prefix=config.REDIS_PREFIX)
-        fmts = {
-            'pk': '_pk',
-            'obj' : ':{pk}',
-            'index': '_index:{field}',
-            'lookup': '_lookup:{field}:{key}',
-        }
-        pre = cls._options['prefix'] + '_' + cls._options['name']
-        cls._fmts = dict((k, pre + v) for k, v in fmts.items())
         cls._fields = {}
         cls._indices = []
-        cls._lookup = []
+
+        if config.REDIS_PREFIX:
+            cls._namespace = config.REDIS_PREFIX + '_' + name
+        else:
+            cls._namespace = name
+
+        cls._keys = {
+            'pk': cls._namespace + '_pk',
+            'all' : cls._namespace + '_all',
+            'obj' : cls._namespace + ':{pk}',
+            'index': cls._namespace + '_index:{field}:{value}'}
 
         for k, v in attrs.iteritems():
             if isinstance(v, Field):
@@ -148,9 +141,6 @@ class BaseModel(type):
 
                 if v.index:
                     cls._indices.append(k)
-
-                if v.lookup:
-                    cls._lookup.append(k)
 
         cls.obj = Manager(cls)
         return cls
@@ -166,10 +156,7 @@ class Model(object):
 
     @classmethod
     def key(cls, name, **kwargs):
-        return cls._fmts[name].format(**kwargs)
-
-    def _incr_pk(self):
-        return r.incr(self.key('pk'))
+        return cls._keys[name].format(**kwargs)
 
     def is_valid(self):
         try:
@@ -188,6 +175,7 @@ class Model(object):
 
             if field.nil and raw in EMPTY_VALUES:
                 continue
+
             setattr(self, name, field.to_python(raw))
 
     def validate(self):
@@ -204,21 +192,18 @@ class Model(object):
             raise ValidationError(self._errors)
 
     def validate_unique(self):
-        '''Check uniqueness on all fields with `lookup=True`'''
+        '''Check uniqueness on all fields with `unique=True`'''
         self._errors = getattr(self, '_errors', {})
         data = self.as_dict()
 
-        for k in self._lookup:
-            if k in self._errors:
+        for name, field in self._fields.items():
+            if not field.unique or attr in self._errors:
                 continue
 
-            v = r.get(self.key('lookup', field=k, key=data[k]))
+            key = self.key('index', field=name, value=data[name])
 
-            if v is None:
-                continue
-
-            if int(v) != self.pk:
-                self._errors[k] = ValidationError('%s `%s` not unique' % (k, data[k])).message
+            if (self.pk and r.sismember(key, self.pk) or r.scard(key) > 0):
+                self._errors[name] = ValidationError('%s `%s` not unique' % (name, data[name])).message
 
         if self._errors:
             raise ValidationError(self._errors)
@@ -228,17 +213,15 @@ class Model(object):
             return False
 
         if self.pk is None:
-            self.pk = self._incr_pk()
+            self.pk = r.incr(self.key('pk'))
 
         data = self.as_dict(to_db=True)
         p = r.pipeline()
         p.hmset(self.key('obj', pk=self.pk), data)
+        p.sadd(self.key('all'), self.pk)
 
         for k in self._indices:
-            p.zadd(self.key('index', field=k), data[k], data['pk'])
-
-        for k in self._lookup:
-            p.set(self.key('lookup', field=k, key=data[k]), data['pk'])
+            p.sadd(self.key('index', field=k, value=data[k]), data['pk'])
 
         p.execute()
         return True
@@ -263,27 +246,16 @@ class Model(object):
 
         return data
 
-    def get(self, pk):
-        raise NotImplementedError
-
-    def put(self, pk, data):
-        raise NotImplementedError
-
-    def delete(self, pk):
-        raise NotImplementedError
-
-    def post(self, data):
-        raise NotImplementedError
-
 class Collection(object):
     '''Create a collection object saved in Redis.
     `key` the redis key for collection.
     `db` or `pipe` must be provided'''
-    def __init__(self, key, db=None, pipe=None):
+    def __init__(self, model, key, db=None, pipe=None):
+        self.model = model
         self.db = pipe or db
 
         if not self.db:
-            raise Exception('missing connection attr')
+            raise Exception('No connection specified')
 
         self.key = key
 
@@ -294,6 +266,42 @@ class Collection(object):
         self.db.delete(self.key)
 
     METHODS = ()
+
+class Set(Collection):
+    def __len__(self):
+        """``x.__len__() <==> len(x)``"""
+        return self.scard()
+
+    def __iter__(self):
+        return self.smembers().__iter__()
+
+    def __contains__(self, value):
+        return self.sismember(value)
+
+    def __repr__(self):
+        return "<%s %s('%s' %s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
+
+    def find(self, **kwargs):
+        # seperate input
+        keys = self.keys(kwargs)
+        target = '~' + '+'.join(keys)
+
+        # then do a sinterstore
+        self.db.sinterstore(target, *keys)
+        self.db.expire(target, 60)
+
+        # return the result as a new Set
+        return Set(self.model, target, db=self.db)
+
+    def keys(self, data):
+        return [self.model.key('index', field=k, value=v) for k, v in data.items()]
+
+    METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
+        'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
+
+class Index(Set):
+    def find(self, **kwargs):
+        pass
 
 class SortedSet(Collection):
     def __getitem__(self, s):
