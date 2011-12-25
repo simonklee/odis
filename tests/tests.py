@@ -12,7 +12,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisco
 
 class Foo(Model):
     username = Field(index=True, unique=True)
-    active = IntegerField(index=True, default=0)
+    active = IntegerField(index=True, default=1)
     created_at = DateTimeField()
 
 class Bar(remod.Model):
@@ -52,6 +52,7 @@ class ModelsTestCase(unittest.TestCase):
 
         f = Foo(username='foo', created_at=datetime.datetime.now())
         self.assertEquals(f.is_valid(), False)
+        self.assertEquals(len(f._errors), 1)
         self.assertEquals(f.save(), False)
 
         f = Foo(username='bar', created_at=datetime.datetime.now())
@@ -74,10 +75,12 @@ class ModelsTestCase(unittest.TestCase):
 
     def test_pack(self):
         f = Foo()
-        data = {'username': 'foo', 'created_at': 1, 'active': None}
+        data = {'username': 'foo', 'created_at': 1}
         f.from_dict(data)
         data['pk'] = None
-        self.assertEquals(f.as_dict(), data)
+        data['active'] = 1
+        got = f.as_dict()
+        self.assertEquals(got, data)
 
 #class ManagerTestCase(unittest.TestCase):
 #    def setUp(self):

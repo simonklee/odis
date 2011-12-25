@@ -32,8 +32,11 @@ class FieldError(Exception):
 class EmptyError(Exception):
     'An error raised on validation'
 
+class EMPTY:
+    pass
+
 class Field(object):
-    def __init__(self, index=False, unique=False, nil=False, default=None):
+    def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
         '''An attribute field on a model.
 
         `index`: if set the value is used create an additional key which maps to
@@ -47,16 +50,36 @@ class Field(object):
         return setattr(instance, '_' + self.name, value)
 
     def __get__(self, instance, owner):
-        if hasattr(instance, '_' + self.name):
-            return getattr(instance, '_' + self.name)
+        attr = '_' + self.name
+
+        if hasattr(instance, attr):
+            return getattr(instance, attr)
+        elif self.default != EMPTY:
+            setattr(instance, attr, self.default)
+            return self.default
+
         return None
 
-    def validate(self, value, model_instance):
-        if not self.nil and self.is_empty(value):
-            raise ValidationError('`%s` nil value' % self.name)
+    def validate(self, instance, value):
+        if self.nil and self.is_empty(value):
+            return
+        elif self.is_empty(value):
+            raise ValidationError('`%s` unexpected nil value' % self.name)
+        try:
+            setattr(instance, self.name, self.to_python(value))
+        except TypeError, e:
+            raise ValidationError('`%s` invalid type "%s"' % (self.name, e.message))
+
+        if self.unique and not self.is_unique(instance, value):
+            raise ValidationError('%s `%s` not unique' % (self.name, value))
 
     def is_empty(self, value):
         return value in EMPTY_VALUES
+
+    def is_unique(self, instance, value):
+        '''Check uniqueness on all fields with `unique=True`'''
+        key = instance.key('index', field=self.name, value=value)
+        return (instance.pk and r.sismember(key, instance.pk) or r.scard(key) == 0)
 
     def to_python(self, value):
         return value
@@ -159,54 +182,25 @@ class Model(object):
         return cls._keys[name].format(**kwargs)
 
     def is_valid(self):
-        try:
-            self.clean()
-            self.validate()
-            self.validate_unique()
-        except ValidationError:
-            return False
-        return True
-
-    def clean(self):
-        '''Calls to_python on all fields which do not contain empty values
-        and have `field.nil` set to True'''
-        for name, field in self._fields.items():
-            raw = getattr(self, name)
-
-            if field.nil and raw in EMPTY_VALUES:
-                continue
-
-            setattr(self, name, field.to_python(raw))
-
-    def validate(self):
-        '''Calls validate() on all fields'''
         self._errors = {}
 
         for name, field in self._fields.items():
             try:
-                field.validate(getattr(self, name), self)
+                field.validate(self, getattr(self, name))
             except ValidationError, e:
                 self._errors[name] = e.message
 
-        if self._errors:
-            raise ValidationError(self._errors)
-
-    def validate_unique(self):
-        '''Check uniqueness on all fields with `unique=True`'''
-        self._errors = getattr(self, '_errors', {})
-        data = self.as_dict()
-
-        for name, field in self._fields.items():
-            if not field.unique or attr in self._errors:
-                continue
-
-            key = self.key('index', field=name, value=data[name])
-
-            if (self.pk and r.sismember(key, self.pk) or r.scard(key) > 0):
-                self._errors[name] = ValidationError('%s `%s` not unique' % (name, data[name])).message
+        try:
+            self.validate()
+        except ValidationError, e:
+            self._errors['__all__'] = e.message
 
         if self._errors:
-            raise ValidationError(self._errors)
+            return False
+        return True
+
+    def validate(self):
+        '''custom validation'''
 
     def save(self):
         if not self.is_valid():
@@ -281,27 +275,38 @@ class Set(Collection):
     def __repr__(self):
         return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
 
-    def find(self, **kwargs):
+    def exclude(self, **kwargs):
+        return self._inter(kwargs, diff=True)
+
+    def filter(self, **kwargs):
+        return self._inter(kwargs)
+
+    def _inter(self, options, expire=60, diff=False):
         # seperate input
-        keys = [self.key] + self.keys(kwargs)
+        keys = [self.key] + self._keys(options)
         target = '~' + '+'.join(keys)
 
-        # then do a sinterstore
-        self.db.sinterstore(target, *keys)
-        self.db.expire(target, 60)
+        # then do the intersection
+        if diff:
+            self.db.sdiffstore(target, *keys)
+        else:
+            self.db.sinterstore(target, *keys)
+
+        # key is just temporary
+        self.db.expire(target, expire)
 
         # return the result as a new Set
         return Set(self.model, target, db=self.db)
 
-    def keys(self, data):
+    def _keys(self, data):
         return [self.model.key('index', field=k, value=v) for k, v in data.items()]
 
     METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
         'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
 
 class Index(Set):
-    def find(self, **kwargs):
-        keys = self.keys(kwargs)
+    def filter(self, **kwargs):
+        keys = self._keys(kwargs)
 
         if len(keys) == 0:
             return self
