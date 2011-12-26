@@ -78,7 +78,7 @@ class Field(object):
 
     def is_unique(self, instance, value):
         '''Check uniqueness on all fields with `unique=True`'''
-        key = instance.key('index', field=self.name, value=value)
+        key = instance.key_for('index', field=self.name, value=value)
         return (instance.pk and r.sismember(key, instance.pk) or r.scard(key) == 0)
 
     def to_python(self, value):
@@ -129,9 +129,9 @@ class Manager(object):
             if not key in self._cls._lookup:
                 raise FieldError('`%s` is not a valid lookup field. fields \
                         are `%`' % (key, self._cls._lookup))
-            pk = r.get(self._cls.key('lookup', field=key, key=value))
+            pk = r.get(self._cls.key_for('lookup', field=key, key=value))
 
-        data = r.hgetall(self._cls.key('obj', pk=pk))
+        data = r.hgetall(self._cls.key_for('obj', pk=pk))
 
         if not data:
             raise EmptyError('`%s(%s=%s)` returned an empty result' %
@@ -174,12 +174,25 @@ class Model(object):
     def __init__(self, **kwargs):
         self.from_dict(kwargs)
 
+    def __hash__(self):
+        return hash(self.key)
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.as_dict() == other.as_dict()
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
     def __repr__(self):
         return u'<%s %s>' % (self.__class__.__name__, self.as_dict())
 
     @classmethod
-    def key(cls, name, **kwargs):
+    def key_for(cls, name, **kwargs):
         return cls._keys[name].format(**kwargs)
+
+    @property
+    def key(self):
+        return self.key_for('obj', pk=self.pk)
 
     def is_valid(self):
         self._errors = {}
@@ -207,18 +220,26 @@ class Model(object):
             return False
 
         if self.pk is None:
-            self.pk = r.incr(self.key('pk'))
+            self.pk = r.incr(self.key_for('pk'))
 
+        self.write()
+        return True
+
+    def write(self):
         data = self.as_dict(to_db=True)
         p = r.pipeline()
-        p.hmset(self.key('obj', pk=self.pk), data)
-        p.sadd(self.key('all'), self.pk)
-
+        # first we delete prior data
+        p.delete(self.key)
+        # then we set the new data
+        p.hmset(self.key, data)
+        # add pk to index for model
+        p.sadd(self.key_for('all'), self.pk)
+        # update other indexes
+        # TODO: make sure we delete indices not more in use.
         for k in self._indices:
-            p.sadd(self.key('index', field=k, value=data[k]), data['pk'])
+            p.sadd(self.key_for('index', field=k, value=data[k]), data['pk'])
 
         p.execute()
-        return True
 
     def from_dict(self, data, to_python=False):
         for name, field in self._fields.items():
@@ -258,6 +279,20 @@ class Collection(object):
 
     def clear(self):
         self.db.delete(self.key)
+
+    def sort(self, **options):
+        return self.db.sort(self.key, **options)
+
+    def sort_by(self, by, **options):
+        options['by'] = self.model.key_for('obj', pk='*->%s' % by)
+        get = options.pop('get', None)
+
+        if get:
+            if isinstance(get, (tuple, list)):
+                get = (self.model.key_for('obj', pk='*->%s' % get[0]), '#')
+            options['get'] = get
+
+        return self.db.sort(self.key, **options)
 
     METHODS = ()
 
@@ -299,7 +334,7 @@ class Set(Collection):
         return Set(self.model, target, db=self.db)
 
     def _keys(self, data):
-        return [self.model.key('index', field=k, value=v) for k, v in data.items()]
+        return [self.model.key_for('index', field=k, value=v) for k, v in data.items()]
 
     METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
         'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
