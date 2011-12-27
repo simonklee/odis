@@ -4,6 +4,7 @@ import redis
 import time
 import datetime
 import functools
+import itertools
 
 from . import config
 
@@ -34,6 +35,153 @@ class EmptyError(Exception):
 
 class EMPTY:
     pass
+
+class Collection(object):
+    '''Create a collection object saved in Redis.
+    `key` the redis key for collection.
+    `db` or `pipe` must be provided'''
+    def __init__(self, model, key):
+        self.model = model
+        self.db = model._db
+
+        if not self.db:
+            raise Exception('No connection specified')
+
+        self.key = key
+
+        for attr in self.METHODS:
+            setattr(self, attr, functools.partial(getattr(self.db, attr), self.key))
+
+    def clear(self):
+        self.db.delete(self.key)
+
+    def sort(self, **options):
+        return self.db.sort(self.key, **options)
+
+    def sort_by(self, by, **options):
+        options['by'] = self.model.key_for('obj', pk='*->%s' % by)
+        get = options.pop('get', None)
+
+        if get:
+            if isinstance(get, (tuple, list)):
+                get = (self.model.key_for('obj', pk='*->%s' % get[0]), '#')
+            options['get'] = get
+
+        return self.db.sort(self.key, **options)
+
+    METHODS = ()
+
+class Set(Collection):
+    def __len__(self):
+        """``x.__len__() <==> len(x)``"""
+        return self.scard()
+
+    def __iter__(self):
+        return itertools.imap(self._map, self.smembers())
+
+    def __contains__(self, value):
+        return self.sismember(value)
+
+    def __repr__(self):
+        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
+
+    def _map(self, pk):
+        data = self.db.hgetall(self.model.key_for('obj', pk=pk))
+        return self.model().from_dict(data, to_python=True)
+
+    def exclude(self, **kwargs):
+        return self._inter(kwargs, diff=True)
+
+    def filter(self, **kwargs):
+        return self._inter(kwargs)
+
+    def _inter(self, options, expire=60, diff=False):
+        # seperate input
+        keys = [self.key] + self._keys(options)
+        target = '~' + '+'.join(keys)
+
+        # then do the intersection
+        if diff:
+            self.db.sdiffstore(target, *keys)
+        else:
+            self.db.sinterstore(target, *keys)
+
+        # key is just temporary
+        self.db.expire(target, expire)
+
+        # return the result as a new Set
+        return Set(self.model, target)
+
+    def _keys(self, data):
+        return [self.model.key_for('index', field=k, value=v) for k, v in data.items()]
+
+    METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
+        'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
+
+class Index(Set):
+    def filter(self, **kwargs):
+        keys = self._keys(kwargs)
+
+        if len(keys) == 0:
+            return self
+        elif len(keys) > 1:
+            return super(Index, self).find(**kwargs)
+        else:
+            return Set(self.model, keys[0])
+
+class Query(object):
+    def __init__(self, cls):
+        self._cls = cls
+        self._all = Index(cls, cls.key_for('all'))
+        self._exclude = {}
+        self._filter = {}
+        self._iter = None
+        self._sort = None
+        self._sort_by = None
+
+    def filter(self, **kwargs):
+        self._filter.update(**kwargs)
+
+    def exclude(self, **kwargs):
+        self._exclude.update(**kwargs)
+
+    def order(self, *args, **kwargs):
+        self._sort = kwargs
+        self._sort_by = args
+
+    def __iter__(self):
+        pass
+
+    def __len__(self):
+        pass
+
+    def __contains__(self, val):
+        pass
+
+    def __getitem__(self, key):
+        pass
+
+    def iterator(self):
+        '''An iterator over the results of the query'''
+
+    #def get(self, **kwargs):
+    #    key, value = kwargs.popitem()
+
+    #    if key == 'pk':
+    #        pk = value
+    #    else:
+    #        if not key in self._cls._lookup:
+    #            raise FieldError('`%s` is not a valid lookup field. fields \
+    #                    are `%`' % (key, self._cls._lookup))
+    #        pk = r.get(self._cls.key_for('lookup', field=key, key=value))
+
+    #    data = r.hgetall(self._cls.key_for('obj', pk=pk))
+
+    #    if not data:
+    #        raise EmptyError('`%s(%s=%s)` returned an empty result' %
+    #                (self._cls.__name__, key, pk or value))
+
+    #    return self._cls().from_dict(data, to_python=True)
 
 class Field(object):
     def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
@@ -79,7 +227,8 @@ class Field(object):
     def is_unique(self, instance, value):
         '''Check uniqueness on all fields with `unique=True`'''
         key = instance.key_for('index', field=self.name, value=value)
-        return (instance.pk and r.sismember(key, instance.pk) or r.scard(key) == 0)
+        return (instance.pk and instance._db.sismember(key, instance.pk) \
+                or instance._db.scard(key) == 0)
 
     def to_python(self, value):
         return value
@@ -112,39 +261,13 @@ class DateField(Field):
     def to_db(self, value):
         return u'%f' % time.mktime(value.timetuple())
 
-class Query(object):
-    def __init__(self, cls):
-        self.cls = cls
-
-class Manager(object):
-    def __init__(self, cls):
-        self._cls = cls
-
-    def get(self, **kwargs):
-        key, value = kwargs.popitem()
-
-        if key == 'pk':
-            pk = value
-        else:
-            if not key in self._cls._lookup:
-                raise FieldError('`%s` is not a valid lookup field. fields \
-                        are `%`' % (key, self._cls._lookup))
-            pk = r.get(self._cls.key_for('lookup', field=key, key=value))
-
-        data = r.hgetall(self._cls.key_for('obj', pk=pk))
-
-        if not data:
-            raise EmptyError('`%s(%s=%s)` returned an empty result' %
-                    (self._cls.__name__, key, pk or value))
-
-        return self._cls().from_dict(data, to_python=True)
-
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
         attrs['pk'] = IntegerField(nil=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
         cls._indices = []
+        cls._db = r
 
         if config.REDIS_PREFIX:
             cls._namespace = config.REDIS_PREFIX + '_' + name
@@ -165,7 +288,7 @@ class BaseModel(type):
                 if v.index:
                     cls._indices.append(k)
 
-        cls.obj = Manager(cls)
+        cls.obj = Query(cls)
         return cls
 
 class Model(object):
@@ -220,14 +343,14 @@ class Model(object):
             return False
 
         if self.pk is None:
-            self.pk = r.incr(self.key_for('pk'))
+            self.pk = self._db.incr(self.key_for('pk'))
 
         self.write()
         return True
 
     def write(self):
         data = self.as_dict(to_db=True)
-        p = r.pipeline()
+        p = self._db.pipeline()
         # first we delete prior data
         p.delete(self.key)
         # then we set the new data
@@ -261,123 +384,34 @@ class Model(object):
 
         return data
 
-class Collection(object):
-    '''Create a collection object saved in Redis.
-    `key` the redis key for collection.
-    `db` or `pipe` must be provided'''
-    def __init__(self, model, key, db=None, pipe=None):
-        self.model = model
-        self.db = pipe or db
-
-        if not self.db:
-            raise Exception('No connection specified')
-
-        self.key = key
-
-        for attr in self.METHODS:
-            setattr(self, attr, functools.partial(getattr(self.db, attr), self.key))
-
-    def clear(self):
-        self.db.delete(self.key)
-
-    def sort(self, **options):
-        return self.db.sort(self.key, **options)
-
-    def sort_by(self, by, **options):
-        options['by'] = self.model.key_for('obj', pk='*->%s' % by)
-        get = options.pop('get', None)
-
-        if get:
-            if isinstance(get, (tuple, list)):
-                get = (self.model.key_for('obj', pk='*->%s' % get[0]), '#')
-            options['get'] = get
-
-        return self.db.sort(self.key, **options)
-
-    METHODS = ()
-
-class Set(Collection):
-    def __len__(self):
-        """``x.__len__() <==> len(x)``"""
-        return self.scard()
-
-    def __iter__(self):
-        return self.smembers().__iter__()
-
-    def __contains__(self, value):
-        return self.sismember(value)
-
-    def __repr__(self):
-        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
-
-    def exclude(self, **kwargs):
-        return self._inter(kwargs, diff=True)
-
-    def filter(self, **kwargs):
-        return self._inter(kwargs)
-
-    def _inter(self, options, expire=60, diff=False):
-        # seperate input
-        keys = [self.key] + self._keys(options)
-        target = '~' + '+'.join(keys)
-
-        # then do the intersection
-        if diff:
-            self.db.sdiffstore(target, *keys)
-        else:
-            self.db.sinterstore(target, *keys)
-
-        # key is just temporary
-        self.db.expire(target, expire)
-
-        # return the result as a new Set
-        return Set(self.model, target, db=self.db)
-
-    def _keys(self, data):
-        return [self.model.key_for('index', field=k, value=v) for k, v in data.items()]
-
-    METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
-        'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
-
-class Index(Set):
-    def filter(self, **kwargs):
-        keys = self._keys(kwargs)
-
-        if len(keys) == 0:
-            return self
-        elif len(keys) > 1:
-            return super(Index, self).find(**kwargs)
-        else:
-            return Set(self.model, keys[0], db=self.db)
-
-class SortedSet(Collection):
-    def __getitem__(self, s):
-        if isinstance(s, slice):
-            start = s.start or 0
-            stop = s.stop or -1
-            stop = stop - 1
-            return self.zrange(start, stop)
-        else:
-            return self.zrange(s, s)[0]
-
-    def __len__(self):
-        """``x.__len__() <==> len(x)``"""
-        return self.zcard(self.key)
-
-    def __iter__(self):
-        return self.members.__iter__()
-
-    def __reversed__(self):
-        return self.zrevrange(0, -1).__iter__()
-
-    def __repr__(self):
-        return "<%s '%s' %s>" % (self.__class__.__name__, self.key, self.members)
-
-    @property
-    def members(self):
-        return self.zrange(0, -1)
-
-    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
-        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
-        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
-        'zscore', 'zunionstore')
+#class SortedSet(Collection):
+#    def __getitem__(self, s):
+#        if isinstance(s, slice):
+#            start = s.start or 0
+#            stop = s.stop or -1
+#            stop = stop - 1
+#            return self.zrange(start, stop)
+#        else:
+#            return self.zrange(s, s)[0]
+#
+#    def __len__(self):
+#        """``x.__len__() <==> len(x)``"""
+#        return self.zcard(self.key)
+#
+#    def __iter__(self):
+#        return self.members.__iter__()
+#
+#    def __reversed__(self):
+#        return self.zrevrange(0, -1).__iter__()
+#
+#    def __repr__(self):
+#        return "<%s '%s' %s>" % (self.__class__.__name__, self.key, self.members)
+#
+#    @property
+#    def members(self):
+#        return self.zrange(0, -1)
+#
+#    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
+#        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
+#        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
+#        'zscore', 'zunionstore')

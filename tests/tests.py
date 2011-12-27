@@ -91,27 +91,36 @@ class ModelsTestCase(unittest.TestCase):
         got = f.as_dict()
         self.assertEqual(got, data)
 
-#class ManagerTestCase(unittest.TestCase):
-#    def setUp(self):
-#        r.flushdb()
-#
-#        for name in ['foo', 'bar', 'baz']:
-#            Foo(username=name, created_at=datetime.datetime.now()).save()
-#
-#    def tearDown(self):
-#        pass
-#
-#    def test_get(self):
-#        f = Foo.obj.get(pk=1)
-#        self.assertEqual(f.pk, 1)
-#        self.assertEqual(f.username, 'foo')
-#
-#        f = Foo.obj.get(username='foo')
-#        self.assertEqual(f.pk, 1)
-#        self.assertEqual(f.username, 'foo')
-#
-#        self.assertRaises(EmptyError, Foo.obj.get, pk=4)
-#        self.assertRaises(EmptyError, Foo.obj.get, username='qux')
+class ManagerTestCase(unittest.TestCase):
+    def setUp(self):
+        r.flushdb()
+
+    def tearDown(self):
+        pass
+
+    def test_filter(self):
+        f1 = Foo(username='foo').save()
+        f2 = Foo(username='bar').save()
+        f3 = Foo(username='baz').save()
+
+        tests = [
+            (list(Foo.obj.filter(username='foo')), [f1], True, 'filter by username'),
+        ]
+
+        for a, b, expected, msg in tests:
+            self.assertEqual(a == b, expected, msg=msg)
+
+    #def test_get(self):
+    #    f = Foo.obj.get(pk=1)
+    #    self.assertEqual(f.pk, 1)
+    #    self.assertEqual(f.username, 'foo')
+
+    #    f = Foo.obj.get(username='foo')
+    #    self.assertEqual(f.pk, 1)
+    #    self.assertEqual(f.username, 'foo')
+
+    #    self.assertRaises(EmptyError, Foo.obj.get, pk=4)
+    #    self.assertRaises(EmptyError, Foo.obj.get, username='qux')
 
 class TypeTestCase(unittest.TestCase):
     def setUp(self):
@@ -124,14 +133,25 @@ class TypeTestCase(unittest.TestCase):
         pass
 
     def test_index(self):
-        index = Index(Foo, Foo.key_for('all'), db=r)
+        f1 = Foo(username='foo').save()
+        f2 = Foo(username='bar').save()
+        f3 = Foo(username='baz').save()
+        index = Index(Foo, Foo.key_for('all'))
+
+        tests = [
+            (list(index.filter(username='foo')), [f1], True, 'filter by username'),
+        ]
+
+        for a, b, expected, msg in tests:
+            self.assertEqual(a == b, expected, msg=msg)
+
 
         for i in index:
             print i
             #self.assertEqual(unicode(i) in s, True)
 
     def test_set(self):
-        s = Set(Foo, Foo.key_for('all'), db=r)
+        s = Set(Foo, Foo.key_for('all'))
 
         for i in range(1, 3):
             self.assertEqual(unicode(i) in s, True)
