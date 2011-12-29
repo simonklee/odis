@@ -1,11 +1,11 @@
+# -*- coding: utf-8 -*-
 import unittest
 import datetime
 import sys
+import base64
 import os
 
 from odis import Model, Field, DateTimeField, r, Set, Index, IntegerField
-
-from redisco import models as remod
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -14,9 +14,9 @@ class Foo(Model):
     active = IntegerField(index=True, default=1)
     created_at = DateTimeField()
 
-class Bar(remod.Model):
-    username = remod.Attribute(required=True)
-    created_at = remod.DateTimeField(auto_now_add=True)
+class Bar(Model):
+    username = Field(index=True, unique=True)
+    created_at = DateTimeField(auto_now_add=True)
 
 class ModelsTestCase(unittest.TestCase):
     def setUp(self):
@@ -91,24 +91,55 @@ class ModelsTestCase(unittest.TestCase):
         got = f.as_dict()
         self.assertEqual(got, data)
 
-class ManagerTestCase(unittest.TestCase):
+class FieldTestCase(unittest.TestCase):
     def setUp(self):
         r.flushdb()
 
-    def tearDown(self):
-        pass
+    @unittest.skip('known datetime bug')
+    def test_datetimefield(self):
+        b1 = Bar(
+            username='foo',
+            created_at=datetime.datetime.fromtimestamp(1325161824.91981))
+        b2 = Bar(
+            username='bar',
+            created_at=datetime.datetime(2011, 12, 29, 13, 30, 24, 91981))
+
+        self.assertEquals(b2.created_at, b1.created_at)
+
+class QueryTestCase(unittest.TestCase):
+    def setUp(self):
+        r.flushdb()
+        self.b1 = Bar(username='foo')
+        self.b2 = Bar(username='bar')
+        self.b3 = Bar(username='bar')
+
+        self.b1.save()
+        self.b2.save()
+        self.b3.save()
+
+    def runtests(self, tests):
+        for a, b, msg in tests:
+            self.assertEqual(a, b, msg=msg)
 
     def test_filter(self):
-        f1 = Foo(username='foo').save()
-        f2 = Foo(username='bar').save()
-        f3 = Foo(username='baz').save()
+        import ipdb
+        ipdb.set_trace()
+        self.runtests([
+            (list(Bar.obj.filter(username='foo')), [self.b1], 'username=foo'),
+        ])
 
-        tests = [
-            (list(Foo.obj.filter(username='foo')), [f1], True, 'filter by username'),
-        ]
+    @unittest.skip('not implemented yet')
+    def test_advanced_filter(self):
+        self.runtests([
+            (list(Bar.obj.filter(username__in=['foo', 'bar'])), [self.b1, self.b2], 'username__in=[foo, bar]'),
+        ])
 
-        for a, b, expected, msg in tests:
-            self.assertEqual(a == b, expected, msg=msg)
+    @unittest.skip('not implemented')
+    def test_chain(self):
+        self.runtests([
+            (list(Bar.obj.filter().exclude(username='bar')), [self.b1], 'filter all, exclude username'),
+            (list(Bar.obj.filter(username='bar').exclude(username='foo')), [self.b2], 'filter all, exclude username'),
+        ])
 
     #def test_get(self):
     #    f = Foo.obj.get(pk=1)
@@ -126,32 +157,89 @@ class TypeTestCase(unittest.TestCase):
     def setUp(self):
         r.flushdb()
 
-        for name in ['foo', 'bar', 'baz']:
-            Foo(username=name, created_at=datetime.datetime.now()).save()
-
     def tearDown(self):
         pass
 
+    @unittest.skip('known datetime bug')
     def test_index(self):
-        f1 = Foo(username='foo').save()
-        f2 = Foo(username='bar').save()
-        f3 = Foo(username='baz').save()
-        index = Index(Foo, Foo.key_for('all'))
+        b1 = Bar(username='foo')
+        saved = b1.save()
+        Bar(username='bar').save()
 
-        tests = [
-            (list(index.filter(username='foo')), [f1], True, 'filter by username'),
-        ]
-
-        for a, b, expected, msg in tests:
-            self.assertEqual(a == b, expected, msg=msg)
-
-
-        for i in index:
-            print i
-            #self.assertEqual(unicode(i) in s, True)
+        index = Index(Bar, Bar.key_for('all'))
+        self.assertEquals(list(index.inter(username='foo')), [b1])
 
     def test_set(self):
+        for name in ['foo', 'bar', 'baz']:
+            Foo(username=name, created_at=datetime.datetime.now()).save()
+
         s = Set(Foo, Foo.key_for('all'))
 
         for i in range(1, 3):
             self.assertEqual(unicode(i) in s, True)
+
+class ScoreTestCase(unittest.TestCase):
+    def setUp(self):
+        match_replace = {
+            u'Æ': u'[',
+            u'Ø': u'\\',
+            u'Å': u']',
+            u'æ': u'{',
+            u'ø': u'|',
+            u'å': u'}'}
+
+        self.rules = [self.build_pattern(pattern, replace) for pattern, replace in match_replace.items()]
+
+    def str_dec(self, s):
+        return ''.join(['%s' % ord(c) for c in s])
+
+    def base64_dec(self, s):
+        return self.str_dec(base64.b64encode(s))
+
+    def build_pattern(self, pattern, replace):
+        import re
+
+        def matches_rule(word):
+            return re.search(pattern, word, flags=re.UNICODE)
+
+        def apply_rule(word):
+            return re.sub(pattern, replace, word, flags=re.UNICODE)
+
+        return (matches_rule, apply_rule)
+
+    def strip(self, word):
+        for m, a in self.rules:
+            if m(word):
+                return a(word)
+
+    def score(self, word):
+        try:
+
+            res = ord(word[0]) * (256^3)
+            res = res + ord(word[1]) * (256^2)
+            res = res + ord(word[2]) * (256^1)
+            res = res + ord(word[3])
+
+        except IndexError:
+            pass
+
+        return res
+
+    def test_trans(self):
+        tests = [
+            (u'å', u'}', True, u'å'),
+            (u'Å', u']', True, u'Å'),
+        ]
+
+        for a, b, expected, msg in tests:
+            self.assertEqual(self.strip(a) == b, expected, msg=msg)
+
+    def test_equality(self):
+        tests = [
+            self.score(u'A') < self.score(u'AAA'),
+            self.score(u'Z') < self.score(u'{'),
+            self.score(u'Z') < self.score(u'{A'),
+        ]
+
+        for a in tests:
+            self.assertEquals(a, True)

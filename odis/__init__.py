@@ -23,6 +23,7 @@ except ImportError:
 r = redis.StrictRedis(**config.REDIS_DATABASE)
 
 EMPTY_VALUES = (None, '', [], (), {})
+CHUNK_SIZE = 100
 
 class ValidationError(Exception):
     'An error raised on validation'
@@ -89,22 +90,29 @@ class Set(Collection):
         data = self.db.hgetall(self.model.key_for('obj', pk=pk))
         return self.model().from_dict(data, to_python=True)
 
-    def exclude(self, **kwargs):
-        return self._inter(kwargs, diff=True)
+    def union(self, **kwargs):
+        return self._do('union', kwargs)
 
-    def filter(self, **kwargs):
-        return self._inter(kwargs)
+    def diff(self, **kwargs):
+        return self._do('diff', kwargs)
 
-    def _inter(self, options, expire=60, diff=False):
+    def inter(self, **kwargs):
+        return self._do('inter', kwargs)
+
+    def _do(self, name, opts, expire=60):
         # seperate input
-        keys = [self.key] + self._keys(options)
+        keys = [self.key] + self._keys(opts)
         target = '~' + '+'.join(keys)
 
-        # then do the intersection
-        if diff:
+        # then do the command
+        if name == 'diff':
             self.db.sdiffstore(target, *keys)
-        else:
+        elif name == 'inter':
             self.db.sinterstore(target, *keys)
+        elif name == 'union':
+            self.db.sunionstore(target, *keys)
+        else:
+            raise ValueError('invalid name `%s`' % name)
 
         # key is just temporary
         self.db.expire(target, expire)
@@ -119,69 +127,142 @@ class Set(Collection):
         'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
 
 class Index(Set):
-    def filter(self, **kwargs):
+    def inter(self, **kwargs):
         keys = self._keys(kwargs)
 
         if len(keys) == 0:
             return self
         elif len(keys) > 1:
-            return super(Index, self).find(**kwargs)
+            return super(Index, self).inter(**kwargs)
         else:
             return Set(self.model, keys[0])
 
 class Query(object):
-    def __init__(self, cls):
-        self._cls = cls
-        self._all = Index(cls, cls.key_for('all'))
-        self._exclude = {}
-        self._filter = {}
+    def __init__(self, model):
+        self.key = None
+        self.llen = None
+        self.index = 0
+        self.diff = {}
+        self.inter = {}
+        self.sort = None
+        self.sort_by = None
+        self.model = model
+        self.db = model._db
+
+    def count(self):
+        if not self.llen:
+            self.do_query()
+            self.llen = self.db.llen(self.key)
+
+        return self.llen
+
+    def do_query(self):
+        if self.key:
+            return
+
+        base = Index(self.model, self.model.key_for('all'))
+        intersected = base.inter(**self.inter)
+        diffed = intersected.diff(**self.diff)
+
+        self.key = diffed.key + '_sorted'
+        diffed.sort(store=self.key)
+
+    def new_chunk(self, start, stop):
+        p = self.db.pipeline()
+
+        for pk in self.db.lrange(self.key, start, stop):
+            p.hgetall(self.model.key_for('obj', pk=pk))
+
+        return p.execute()
+
+    def fetchvalues(self):
+        self.do_query()
+
+        while self.index < self.count():
+            val = self.new_chunk(self.index, self.index + CHUNK_SIZE)
+            self.index = self.index + CHUNK_SIZE
+            return val
+
+        return []
+
+    def result_iter(self):
+        for chunks in iter(self.fetchvalues, []):
+            for data in chunks:
+                yield data
+
+    def add_query(self, negate, **kwargs):
+        if negate:
+            self.diff.update(**kwargs)
+        else:
+            self.inter.update(**kwargs)
+        return self
+
+    def add_sorting(self, *args, **kwargs):
+        self.sort = kwargs
+        self.sort_by = args
+
+class QuerySet(object):
+    def __init__(self, model):
+        self.model = model
+        self._query = Query(model)
+        self._cache = None
         self._iter = None
-        self._sort = None
-        self._sort_by = None
 
     def filter(self, **kwargs):
-        self._filter.update(**kwargs)
+        self._query.add_query(False, **kwargs)
+        return self
 
     def exclude(self, **kwargs):
-        self._exclude.update(**kwargs)
+        self._query.add_query(True, **kwargs)
+        return self
 
     def order(self, *args, **kwargs):
-        self._sort = kwargs
-        self._sort_by = args
+        self._query.add_sorting(*args, **kwargs)
+        return self
 
     def __iter__(self):
-        pass
+        if self._cache is None:
+            self._cache = []
+            self._iter = self.iterator()
+
+        if self._iter:
+            return self._cache_iter()
+
+        return iter(self._cache)
+
+    def _cache_iter(self):
+        pos = 0
+
+        while 1:
+            upper = len(self._cache)
+
+            while pos < upper:
+                yield self._cache[pos]
+                pos = pos + 1
+
+            if not self._iter:
+                raise StopIteration
+
+            if len(self._cache) <= pos:
+                self._cache_fill()
+
+    def _cache_fill(self):
+        try:
+            for i in range(CHUNK_SIZE):
+                self._cache.append(self._iter.next())
+        except StopIteration:
+            self._iter = None
 
     def __len__(self):
-        pass
-
-    def __contains__(self, val):
-        pass
+        return self._query.count()
 
     def __getitem__(self, key):
         pass
 
     def iterator(self):
         '''An iterator over the results of the query'''
-
-    #def get(self, **kwargs):
-    #    key, value = kwargs.popitem()
-
-    #    if key == 'pk':
-    #        pk = value
-    #    else:
-    #        if not key in self._cls._lookup:
-    #            raise FieldError('`%s` is not a valid lookup field. fields \
-    #                    are `%`' % (key, self._cls._lookup))
-    #        pk = r.get(self._cls.key_for('lookup', field=key, key=value))
-
-    #    data = r.hgetall(self._cls.key_for('obj', pk=pk))
-
-    #    if not data:
-    #        raise EmptyError('`%s(%s=%s)` returned an empty result' %
-    #                (self._cls.__name__, key, pk or value))
-
-    #    return self._cls().from_dict(data, to_python=True)
+        for data in self._query.result_iter():
+            yield self.model().from_dict(data, to_python=True)
 
 class Field(object):
     def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
@@ -244,13 +325,23 @@ class IntegerField(Field):
         return unicode(value)
 
 class DateTimeField(Field):
+    def __init__(self, auto_now_add=False, **kwargs):
+        super(DateTimeField, self).__init__(**kwargs)
+        self.auto_now_add = auto_now_add
+
+    def validate(self, instance, value):
+        if self.is_empty(value) and self.auto_now_add:
+            value = datetime.datetime.now()
+            setattr(instance, self.name, value)
+        super(DateTimeField, self).validate(instance, value)
+
     def to_python(self, value):
         if not isinstance(value, datetime.datetime):
             return datetime.datetime.fromtimestamp(float(value))
         return value
 
     def to_db(self, value):
-        return u'%d.%d' % (time.mktime(value.timetuple()), value.microsecond)
+        return u'%d.%s' % (time.mktime(value.timetuple()), str(value.microsecond).ljust(6, '0'))
 
 class DateField(Field):
     def to_python(self, value):
@@ -288,7 +379,7 @@ class BaseModel(type):
                 if v.index:
                     cls._indices.append(k)
 
-        cls.obj = Query(cls)
+        cls.obj = QuerySet(cls)
         return cls
 
 class Model(object):
@@ -343,7 +434,7 @@ class Model(object):
             return False
 
         if self.pk is None:
-            self.pk = self._db.incr(self.key_for('pk'))
+            setattr(self, 'pk', self._db.incr(self.key_for('pk')))
 
         self.write()
         return True
