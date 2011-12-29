@@ -91,18 +91,18 @@ class Set(Collection):
         return self.model().from_dict(data, to_python=True)
 
     def union(self, **kwargs):
-        return self._do('union', kwargs)
+        return self._do('union', kwargs, op='*')
 
     def diff(self, **kwargs):
-        return self._do('diff', kwargs)
+        return self._do('diff', kwargs, op='-')
 
     def inter(self, **kwargs):
         return self._do('inter', kwargs)
 
-    def _do(self, name, opts, expire=60):
+    def _do(self, name, opts, op='+', expire=60):
         # seperate input
-        keys = [self.key] + self._keys(opts)
-        target = '~' + '+'.join(keys)
+        keys = [self.key] + self.keys(self.model, opts)
+        target = '~' + op.join(keys)
 
         # then do the command
         if name == 'diff':
@@ -120,15 +120,23 @@ class Set(Collection):
         # return the result as a new Set
         return Set(self.model, target)
 
-    def _keys(self, data):
-        return [self.model.key_for('index', field=k, value=v) for k, v in data.items()]
+    @classmethod
+    def keys(cls, model, data):
+        keys = []
+        sorted_keys = data.keys()
+        sorted_keys.sort()
+
+        for k in sorted_keys:
+            keys.append(model.key_for('index', field=k, value=data[k]))
+
+        return keys
 
     METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
         'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
 
 class Index(Set):
     def inter(self, **kwargs):
-        keys = self._keys(kwargs)
+        keys = self.keys(self.model, kwargs)
 
         if len(keys) == 0:
             return self
@@ -149,6 +157,14 @@ class Query(object):
         self.model = model
         self.db = model._db
 
+    def _clone(self):
+        obj = self.__class__(self.model)
+        obj.diff = self.diff.copy()
+        obj.inter = self.inter.copy()
+        obj.sort = self.sort
+        obj.sort_by = self.sort_by
+        return obj
+
     def count(self):
         if not self.llen:
             self.do_query()
@@ -163,9 +179,40 @@ class Query(object):
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
-
         self.key = diffed.key + '_sorted'
         diffed.sort(store=self.key)
+
+    def parse_key(self, key):
+        parts = [('^', []), ('-', []), ('+', []), ('~', [])]
+
+        for op, l in parts:
+            key = self._parse_key_part(key, op, l)
+
+        return [part for op, part in reversed(parts)]
+
+    def _parse_key_part(self, key, sep, res):
+        a, op, b = key.rpartition(sep)
+
+        if op == '':
+            return key
+        else:
+            res.insert(0, b)
+            return self._parse_key_part(a, sep, res)
+
+    def build_key(self):
+        '''The key is predefined based on the model,
+        intersection, difference and sorting.'''
+        key = '~' + self.model.key_for('all')
+        inter = Index.keys(self.model, self.inter)
+        diff = Index.keys(self.model, self.diff)
+
+        if len(inter) > 0:
+            key = key + '+' + '+'.join(inter)
+
+        if len(diff) > 0:
+            key = key + '-' + '-'.join(diff)
+
+        return key
 
     def new_chunk(self, start, stop):
         p = self.db.pipeline()
@@ -175,7 +222,7 @@ class Query(object):
 
         return p.execute()
 
-    def fetchvalues(self):
+    def fetch_values(self):
         self.do_query()
 
         while self.index < self.count():
@@ -186,7 +233,7 @@ class Query(object):
         return []
 
     def result_iter(self):
-        for chunks in iter(self.fetchvalues, []):
+        for chunks in iter(self.fetch_values, []):
             for data in chunks:
                 yield data
 
@@ -197,28 +244,40 @@ class Query(object):
             self.inter.update(**kwargs)
         return self
 
-    def add_sorting(self, *args, **kwargs):
-        self.sort = kwargs
-        self.sort_by = args
+    def add_sorting(self, by):
+        self.sort = by
 
 class QuerySet(object):
-    def __init__(self, model):
+    def __init__(self, model, query=None):
         self.model = model
-        self._query = Query(model)
+        self.query = query or Query(model)
         self._cache = None
         self._iter = None
 
     def filter(self, **kwargs):
-        self._query.add_query(False, **kwargs)
-        return self
+        c = self._clone()
+        c.query.add_query(False, **kwargs)
+        return c
 
     def exclude(self, **kwargs):
-        self._query.add_query(True, **kwargs)
-        return self
+        c = self._clone()
+        c.query.add_query(True, **kwargs)
+        return c
 
-    def order(self, *args, **kwargs):
-        self._query.add_sorting(*args, **kwargs)
-        return self
+    def order(self, by):
+        c = self._clone()
+        c.query.add_sorting(by)
+        return c
+
+    def iterator(self):
+        for data in self.query.result_iter():
+            yield self.model().from_dict(data, to_python=True)
+
+    def __len__(self):
+        return self.query.count()
+
+    def __getitem__(self, key):
+        pass
 
     def __iter__(self):
         if self._cache is None:
@@ -229,6 +288,9 @@ class QuerySet(object):
             return self._cache_iter()
 
         return iter(self._cache)
+
+    def _clone(self):
+        return self.__class__(self.model, query=self.query._clone())
 
     def _cache_iter(self):
         pos = 0
@@ -252,17 +314,6 @@ class QuerySet(object):
                 self._cache.append(self._iter.next())
         except StopIteration:
             self._iter = None
-
-    def __len__(self):
-        return self._query.count()
-
-    def __getitem__(self, key):
-        pass
-
-    def iterator(self):
-        '''An iterator over the results of the query'''
-        for data in self._query.result_iter():
-            yield self.model().from_dict(data, to_python=True)
 
 class Field(object):
     def __init__(self, index=False, unique=False, nil=False, default=EMPTY):

@@ -121,9 +121,21 @@ class QueryTestCase(unittest.TestCase):
         for a, b, msg in tests:
             self.assertEqual(a, b, msg=msg)
 
+    def test_key_parser(self):
+        parse_key = Foo.obj.filter(username='foo').query.parse_key
+        self.runtests([
+            (parse_key('~S'),       [['S'], [],        [],        []],          'all'),
+            (parse_key('~S^S:a'),   [['S'], [],        [],        ['S:a']],     'all+sort'),
+            (parse_key('~S-S:d:0'), [['S'], [],        ['S:d:0'], []],          'all+diff'),
+            (parse_key('~S+S:a:1'), [['S'], ['S:a:1'], [],        []],          'all+inter'),
+            (parse_key('~S+S:a:1+S:b:2-S:d:0^S:a'), [['S'], ['S:a:1', 'S:b:2'], ['S:d:0'], ['S:a']], 'all+inter+inter+diff+sort')
+        ])
+
+    def test_key_builder(self):
+        self.runtests([
+        ])
+
     def test_filter(self):
-        import ipdb
-        ipdb.set_trace()
         self.runtests([
             (list(Bar.obj.filter(username='foo')), [self.b1], 'username=foo'),
         ])
@@ -134,7 +146,6 @@ class QueryTestCase(unittest.TestCase):
             (list(Bar.obj.filter(username__in=['foo', 'bar'])), [self.b1, self.b2], 'username__in=[foo, bar]'),
         ])
 
-    @unittest.skip('not implemented')
     def test_chain(self):
         self.runtests([
             (list(Bar.obj.filter().exclude(username='bar')), [self.b1], 'filter all, exclude username'),
