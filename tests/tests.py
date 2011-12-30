@@ -186,15 +186,12 @@ class TypeTestCase(unittest.TestCase):
     def tearDown(self):
         pass
 
-    @unittest.skip('known datetime bug')
     def test_index(self):
-
-        b1 = Bar(username='foo')
-        saved = b1.save()
-        Bar(username='bar').save()
+        for name in ['foo', 'bar', 'baz']:
+            Bar(username=name).save()
 
         index = Index(Bar, Bar.key_for('all'))
-        self.assertEquals(list(index.inter(username='foo')), [b1])
+        self.assertEquals(list(index.inter(username='foo')), ['1'])
 
     def test_set(self):
         for name in ['foo', 'bar', 'baz']:

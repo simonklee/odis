@@ -3,7 +3,6 @@ from __future__ import absolute_import
 import redis
 import time
 import datetime
-import functools
 import itertools
 
 from . import config
@@ -51,7 +50,7 @@ class Collection(object):
         self.key = key
 
         for attr in self.METHODS:
-            setattr(self, attr, functools.partial(getattr(self.db, attr), self.key))
+            setattr(self, attr, getattr(self.db, attr))
 
     def clear(self):
         self.db.delete(self.key)
@@ -75,20 +74,21 @@ class Collection(object):
 class Set(Collection):
     def __len__(self):
         """``x.__len__() <==> len(x)``"""
-        return self.scard()
+        return self.db.scard(self.key)
 
     def __iter__(self):
-        return itertools.imap(self._map, self.smembers())
+        return iter(self.db.smembers(self.key))
+        #return itertools.imap(self._map, self.db.smembers(self.key))
 
     def __contains__(self, value):
-        return self.sismember(value)
+        return self.db.sismember(self.key, value)
 
     def __repr__(self):
-        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.smembers())
+        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.db.smembers(self.key))
 
-    def _map(self, pk):
-        data = self.db.hgetall(self.model.key_for('obj', pk=pk))
-        return self.model().from_dict(data, to_python=True)
+    #def _map(self, pk):
+    #    data = self.db.hgetall(self.model.key_for('obj', pk=pk))
+    #    return self.model().from_dict(data, to_python=True)
 
     def diff(self, **kwargs):
         return self._do(
@@ -222,10 +222,16 @@ class Query(object):
         if self.key:
             return
 
+        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort)
+
+        if self.db.exists(self.key):
+            return
+        else:
+            self.db.sadd(self.model.key_for('queries'), self.key)
+
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
-        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort)
         self.do_sort(diffed)
 
     def do_sort(self, index):
@@ -491,7 +497,9 @@ class BaseModel(type):
             'all' : cls._namespace + '_all',
             'obj' : cls._namespace + ':{pk}',
             'index': cls._namespace + '_index:{field}:{value}',
-            'zindex': cls._namespace + '_zindex:{field}'}
+            'index': cls._namespace + '_index:{field}:{value}',
+            'zindex': cls._namespace + '_zindex:{field}',
+            'queries': cls._namespace + '_cached_queries'}
 
         for k, v in attrs.iteritems():
             if isinstance(v, Field):
