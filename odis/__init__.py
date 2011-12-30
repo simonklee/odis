@@ -90,29 +90,24 @@ class Set(Collection):
         data = self.db.hgetall(self.model.key_for('obj', pk=pk))
         return self.model().from_dict(data, to_python=True)
 
-    def union(self, **kwargs):
-        return self._do('union', kwargs, op='*')
-
     def diff(self, **kwargs):
-        return self._do('diff', kwargs, op='-')
+        return self._do(
+            self.db.sdiffstore,
+            QueryKey(self.model).build_key({}, kwargs, ''),
+            kwargs)
 
     def inter(self, **kwargs):
-        return self._do('inter', kwargs)
+        return self._do(
+            self.db.sinterstore,
+            QueryKey(self.model).build_key(kwargs, {}, ''),
+            kwargs)
 
-    def _do(self, name, opts, op='+', expire=60):
+    def _do(self, command, target, opts, expire=60):
         # seperate input
         keys = [self.key] + QueryKey(self.model).sort_fields(opts)
-        target = '~' + op.join(keys)
 
         # then do the command
-        if name == 'diff':
-            self.db.sdiffstore(target, *keys)
-        elif name == 'inter':
-            self.db.sinterstore(target, *keys)
-        elif name == 'union':
-            self.db.sunionstore(target, *keys)
-        else:
-            raise ValueError('invalid name `%s`' % name)
+        command(target, *keys)
 
         # key is just temporary
         self.db.expire(target, expire)
