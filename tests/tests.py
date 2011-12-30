@@ -5,7 +5,7 @@ import sys
 import base64
 import os
 
-from odis import Model, Field, DateTimeField, r, Set, Index, IntegerField
+from odis import Model, Field, DateTimeField, r, Set, Index, IntegerField, QueryKey
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -16,7 +16,7 @@ class Foo(Model):
 
 class Bar(Model):
     username = Field(index=True, unique=True)
-    created_at = DateTimeField(auto_now_add=True)
+    created_at = DateTimeField(auto_now_add=True, zindex=True)
 
 class ModelsTestCase(unittest.TestCase):
     def setUp(self):
@@ -111,7 +111,7 @@ class QueryTestCase(unittest.TestCase):
         r.flushdb()
         self.b1 = Bar(username='foo')
         self.b2 = Bar(username='bar')
-        self.b3 = Bar(username='bar')
+        self.b3 = Bar(username='baz')
 
         self.b1.save()
         self.b2.save()
@@ -122,22 +122,42 @@ class QueryTestCase(unittest.TestCase):
             self.assertEqual(a, b, msg=msg)
 
     def test_key_parser(self):
-        parse_key = Foo.obj.filter(username='foo').query.parse_key
+        qk = QueryKey(Foo)
         self.runtests([
-            (parse_key('~S'),       [['S'], [],        [],        []],          'all'),
-            (parse_key('~S^S:a'),   [['S'], [],        [],        ['S:a']],     'all+sort'),
-            (parse_key('~S-S:d:0'), [['S'], [],        ['S:d:0'], []],          'all+diff'),
-            (parse_key('~S+S:a:1'), [['S'], ['S:a:1'], [],        []],          'all+inter'),
-            (parse_key('~S+S:a:1+S:b:2-S:d:0^S:a'), [['S'], ['S:a:1', 'S:b:2'], ['S:d:0'], ['S:a']], 'all+inter+inter+diff+sort')
+            (qk.parse_key('~S'),       [['S'], [],        [],        []],          'all'),
+            (qk.parse_key('~S^S:a'),   [['S'], [],        [],        ['S:a']],     'all+sort'),
+            (qk.parse_key('~S-S:d:0'), [['S'], [],        ['S:d:0'], []],          'all+diff'),
+            (qk.parse_key('~S+S:a:1'), [['S'], ['S:a:1'], [],        []],          'all+inter'),
+            (qk.parse_key('~S+S:a:1+S:b:2-S:d:0^S:a'), [['S'], ['S:a:1', 'S:b:2'], ['S:d:0'], ['S:a']], 'all+inter+inter+diff+sort')
         ])
 
     def test_key_builder(self):
+        qk = QueryKey(Foo)
+
         self.runtests([
+            (qk.build_key({}, {}, ''), '~Foo_all',  'all'),
+            (qk.build_key({'username': 'foo'}, {}, ''), '~Foo_all+Foo_index:username:foo',  'all+inter'),
+            (qk.build_key({}, {'username': 'foo'}, ''), '~Foo_all-Foo_index:username:foo',  'all+diff'),
+            (qk.build_key({}, {}, 'Foo:username'), '~Foo_all^Foo:username',  'all+sort'),
         ])
 
     def test_filter(self):
         self.runtests([
             (list(Bar.obj.filter(username='foo')), [self.b1], 'username=foo'),
+        ])
+
+    def test_chain(self):
+        res = list(Bar.obj.filter().exclude(username='bar'))
+        self.runtests([
+            (res, [self.b1, self.b3], 'filter all, exclude username'),
+            (list(Bar.obj.filter(username='bar').exclude(username='foo')), [self.b2], 'filter all, exclude username'),
+        ])
+
+    def test_sorting(self):
+        self.runtests([
+            (list(Bar.obj.order('pk')), [self.b1, self.b2, self.b3], 'SORT by Bar:*->pk'),
+            (list(Bar.obj.order('username', alpha=True)), [self.b2, self.b3, self.b1], 'SORT by Bar:*->username'),
+            (list(Bar.obj.order('created_at', zindex=True)), [self.b1, self.b2, self.b3], 'ZINTERSTORE Bar_zindex:created_at')
         ])
 
     @unittest.skip('not implemented yet')
@@ -146,11 +166,6 @@ class QueryTestCase(unittest.TestCase):
             (list(Bar.obj.filter(username__in=['foo', 'bar'])), [self.b1, self.b2], 'username__in=[foo, bar]'),
         ])
 
-    def test_chain(self):
-        self.runtests([
-            (list(Bar.obj.filter().exclude(username='bar')), [self.b1], 'filter all, exclude username'),
-            (list(Bar.obj.filter(username='bar').exclude(username='foo')), [self.b2], 'filter all, exclude username'),
-        ])
 
     #def test_get(self):
     #    f = Foo.obj.get(pk=1)
@@ -173,6 +188,7 @@ class TypeTestCase(unittest.TestCase):
 
     @unittest.skip('known datetime bug')
     def test_index(self):
+
         b1 = Bar(username='foo')
         saved = b1.save()
         Bar(username='bar').save()

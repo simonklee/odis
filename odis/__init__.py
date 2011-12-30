@@ -101,7 +101,7 @@ class Set(Collection):
 
     def _do(self, name, opts, op='+', expire=60):
         # seperate input
-        keys = [self.key] + self.keys(self.model, opts)
+        keys = [self.key] + QueryKey(self.model).sort_fields(opts)
         target = '~' + op.join(keys)
 
         # then do the command
@@ -120,67 +120,41 @@ class Set(Collection):
         # return the result as a new Set
         return Set(self.model, target)
 
-    @classmethod
-    def keys(cls, model, data):
-        keys = []
-        sorted_keys = data.keys()
-        sorted_keys.sort()
-
-        for k in sorted_keys:
-            keys.append(model.key_for('index', field=k, value=data[k]))
-
-        return keys
-
     METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
         'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
 
 class Index(Set):
     def inter(self, **kwargs):
-        keys = self.keys(self.model, kwargs)
+        keys = QueryKey(self.model).sort_fields(kwargs)
 
         if len(keys) == 0:
             return self
         elif len(keys) > 1:
             return super(Index, self).inter(**kwargs)
         else:
-            return Set(self.model, keys[0])
+            return Index(self.model, keys[0])
 
-class Query(object):
+    def diff(self, **kwargs):
+        keys = QueryKey(self.model).sort_fields(kwargs)
+
+        if len(keys) == 0:
+            return self
+        else:
+            return super(Index, self).diff(**kwargs)
+
+class QueryKey(object):
     def __init__(self, model):
-        self.key = None
-        self.llen = None
-        self.index = 0
-        self.diff = {}
-        self.inter = {}
-        self.sort = None
-        self.sort_by = None
         self.model = model
-        self.db = model._db
 
-    def _clone(self):
-        obj = self.__class__(self.model)
-        obj.diff = self.diff.copy()
-        obj.inter = self.inter.copy()
-        obj.sort = self.sort
-        obj.sort_by = self.sort_by
-        return obj
+    def sort_fields(self, data):
+        keys = []
+        sorted_keys = data.keys()
+        sorted_keys.sort()
 
-    def count(self):
-        if not self.llen:
-            self.do_query()
-            self.llen = self.db.llen(self.key)
+        for k in sorted_keys:
+            keys.append(self.model.key_for('index', field=k, value=data[k]))
 
-        return self.llen
-
-    def do_query(self):
-        if self.key:
-            return
-
-        base = Index(self.model, self.model.key_for('all'))
-        intersected = base.inter(**self.inter)
-        diffed = intersected.diff(**self.diff)
-        self.key = diffed.key + '_sorted'
-        diffed.sort(store=self.key)
+        return keys
 
     def parse_key(self, key):
         parts = [('^', []), ('-', []), ('+', []), ('~', [])]
@@ -199,20 +173,69 @@ class Query(object):
             res.insert(0, b)
             return self._parse_key_part(a, sep, res)
 
-    def build_key(self):
+    def build_key(self, inter, diff, sort):
         '''The key is predefined based on the model,
         intersection, difference and sorting.'''
         key = '~' + self.model.key_for('all')
-        inter = Index.keys(self.model, self.inter)
-        diff = Index.keys(self.model, self.diff)
+        sorted_inter = self.sort_fields(inter)
+        sorted_diff = self.sort_fields(diff)
 
         if len(inter) > 0:
-            key = key + '+' + '+'.join(inter)
+            key = key + '+' + '+'.join(sorted_inter)
 
         if len(diff) > 0:
-            key = key + '-' + '-'.join(diff)
+            key = key + '-' + '-'.join(sorted_diff)
+
+        if len(sort) > 0:
+            key = key + '^' + sort
 
         return key
+
+class Query(object):
+    def __init__(self, model):
+        self.key = None
+        self.llen = None
+        self.index = 0
+        self.diff = {}
+        self.inter = {}
+        self.sort = ''
+        self.sort_opts = {}
+        self.model = model
+        self.db = model._db
+
+    def _clone(self, zclone=False):
+        if zclone:
+            obj = ZQuery(self.model)
+            print "zquery"
+        else:
+            obj = self.__class__(self.model)
+
+        obj.diff = self.diff.copy()
+        obj.inter = self.inter.copy()
+        obj.sort = self.sort
+        obj.sort_opts = self.sort_opts.copy()
+        return obj
+
+    def count(self):
+        if not self.llen:
+            self.do_query()
+            self.llen = self.db.llen(self.key)
+
+        return self.llen
+
+    def do_query(self):
+        if self.key:
+            return
+
+        base = Index(self.model, self.model.key_for('all'))
+        intersected = base.inter(**self.inter)
+        diffed = intersected.diff(**self.diff)
+        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort)
+        self.do_sort(diffed)
+
+    def do_sort(self, index):
+        self.sort_opts['store'] = self.key
+        index.sort(**self.sort_opts)
 
     def new_chunk(self, start, stop):
         p = self.db.pipeline()
@@ -244,8 +267,28 @@ class Query(object):
             self.inter.update(**kwargs)
         return self
 
-    def add_sorting(self, by):
-        self.sort = by
+    def add_sorting(self, field, opts):
+        self.sort = field
+        self.sort_opts = opts
+
+class ZQuery(Query):
+    def count(self):
+        if not self.llen:
+            self.do_query()
+            self.llen = self.db.zcard(self.key)
+
+        return self.llen
+
+    def do_sort(self, index):
+        self.db.zinterstore(self.key, [self.sort])
+
+    def new_chunk(self, start, stop):
+        p = self.db.pipeline()
+
+        for pk in self.db.zrange(self.key, start, stop):
+            p.hgetall(self.model.key_for('obj', pk=pk))
+
+        return p.execute()
 
 class QuerySet(object):
     def __init__(self, model, query=None):
@@ -264,16 +307,35 @@ class QuerySet(object):
         c.query.add_query(True, **kwargs)
         return c
 
-    def order(self, by):
-        c = self._clone()
-        c.query.add_sorting(by)
+    def order(self, field, *args, **kwargs):
+        opts = kwargs.copy()
+
+        if field.startswith('-'):
+            field, opts['desc'] = field[1:], True
+        else:
+            opts['desc'] = False
+
+        if opts.pop('zindex', None) and field in self.model._zindices:
+            c = self._clone(zclone=True)
+            field = self.model.key_for('zindex', field=field)
+        elif field in self.model._fields:
+            c = self._clone()
+            field = self.model.key_for('obj', pk='*->%s' % field)
+            opts['by'] = field
+        else:
+            raise ValidationError('currently only sortable by fields on this model')
+
+        c.query.add_sorting(field, opts)
         return c
 
     def iterator(self):
+        self._resolve_order()
+
         for data in self.query.result_iter():
             yield self.model().from_dict(data, to_python=True)
 
     def __len__(self):
+        self._resolve_order()
         return self.query.count()
 
     def __getitem__(self, key):
@@ -289,8 +351,15 @@ class QuerySet(object):
 
         return iter(self._cache)
 
-    def _clone(self):
-        return self.__class__(self.model, query=self.query._clone())
+    def _clone(self, *args, **kwargs):
+        return self.__class__(self.model, query=self.query._clone(*args, **kwargs))
+
+    def _resolve_order(self):
+        if len(self.query.sort) > 0:
+            return
+
+        self.query = self.query._clone()
+        self.query.add_sorting(self.model.key_for('obj', pk='*->pk'), {})
 
     def _cache_iter(self):
         pos = 0
@@ -368,14 +437,19 @@ class Field(object):
     def to_db(self, value):
         return value
 
-class IntegerField(Field):
+class ZField(Field):
+    def __init__(self, zindex=False, **kwargs):
+        super(ZField, self).__init__(**kwargs)
+        self.zindex = zindex
+
+class IntegerField(ZField):
     def to_python(self, value):
         return int(value)
 
     def to_db(self, value):
         return unicode(value)
 
-class DateTimeField(Field):
+class DateTimeField(ZField):
     def __init__(self, auto_now_add=False, **kwargs):
         super(DateTimeField, self).__init__(**kwargs)
         self.auto_now_add = auto_now_add
@@ -394,7 +468,7 @@ class DateTimeField(Field):
     def to_db(self, value):
         return u'%d.%s' % (time.mktime(value.timetuple()), str(value.microsecond).ljust(6, '0'))
 
-class DateField(Field):
+class DateField(ZField):
     def to_python(self, value):
         if not isinstance(value, datetime.date):
             return datetime.date.fromtimestamp(float(value))
@@ -409,6 +483,7 @@ class BaseModel(type):
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
         cls._indices = []
+        cls._zindices = []
         cls._db = r
 
         if config.REDIS_PREFIX:
@@ -420,7 +495,8 @@ class BaseModel(type):
             'pk': cls._namespace + '_pk',
             'all' : cls._namespace + '_all',
             'obj' : cls._namespace + ':{pk}',
-            'index': cls._namespace + '_index:{field}:{value}'}
+            'index': cls._namespace + '_index:{field}:{value}',
+            'zindex': cls._namespace + '_zindex:{field}'}
 
         for k, v in attrs.iteritems():
             if isinstance(v, Field):
@@ -429,6 +505,9 @@ class BaseModel(type):
 
                 if v.index:
                     cls._indices.append(k)
+
+                if getattr(v, 'zindex', False):
+                    cls._zindices.append(k)
 
         cls.obj = QuerySet(cls)
         return cls
@@ -503,6 +582,9 @@ class Model(object):
         # TODO: make sure we delete indices not more in use.
         for k in self._indices:
             p.sadd(self.key_for('index', field=k, value=data[k]), data['pk'])
+
+        for k in self._zindices:
+            r.zadd(self.key_for('zindex', field=k), data[k], data['pk'])
 
         p.execute()
 
