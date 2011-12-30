@@ -3,7 +3,6 @@ from __future__ import absolute_import
 import redis
 import time
 import datetime
-import itertools
 
 from . import config
 
@@ -223,16 +222,17 @@ class Query(object):
             return
 
         self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort)
+        timestamp = int(time.time() + 604800.0)
 
-        if self.db.exists(self.key):
+        if self.db.zadd(self.model.key_for('queries'), timestamp, self.key) == 0:
+            self.db.expireat(self.key, timestamp)
             return
-        else:
-            self.db.sadd(self.model.key_for('queries'), self.key)
 
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
         self.do_sort(diffed)
+        self.db.expireat(self.key, timestamp)
 
     def do_sort(self, index):
         self.sort_opts['store'] = self.key
