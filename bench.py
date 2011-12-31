@@ -123,21 +123,21 @@ class Query(object):
 #
 #p.execute()
 
-db.flushdb()
-p = db.pipeline()
-
-for i in range(40000):
-    data = {
-        'pk': i,
-        'active': random.randint(0, 1),
-        'username': random.choice(['foo', 'bar', 'qux']),
-        'type': random.choice(['V', 'P', 'A'])}
-    p.sadd('baz:all', i)
-    p.hmset('baz:%d' % i, data)
-    p.sadd('baz:username:%s' % data['username'], i)
-    p.sadd('baz:type:%s' % data['type'], i)
-    p.zadd('baz:active', data['active'], i)
-p.execute()
+#db.flushdb()
+#p = db.pipeline()
+#
+#for i in range(10000):
+#    data = {
+#        'pk': i,
+#        'active': random.randint(0, 1),
+#        'username': random.choice(['foo', 'bar', 'qux']),
+#        'type': random.choice(['V', 'P', 'A'])}
+#    p.sadd('baz:all', i)
+#    p.hmset('baz:%d' % i, data)
+#    p.sadd('baz:username:%s' % data['username'], i)
+#    p.sadd('baz:type:%s' % data['type'], i)
+#    p.zadd('baz:active', data['active'], i)
+#p.execute()
 #
 #db.flushdb()
 #p = db.pipeline()
@@ -158,7 +158,7 @@ p.execute()
 total = time.time()
 
 start2 = time.time()
-print db.sunionstore('foo+bar', ['foo:username:qux', 'foo:type:P'])
+print db.sunionstore('foo+bar', ['baz:username:qux', 'baz:type:P'])
 print 'foo+bar %.3fms' % (time.time() - start2)
 
 #start2 = time.time()
@@ -168,12 +168,12 @@ print 'foo+bar %.3fms' % (time.time() - start2)
 #print db.zinterstore('qux', {'foo+bar+active':0, 'bar:active': 1})
 #print db.zinterstore('qux', {'foo+bar+active':0, 'bar:active': 1})
 start2 = time.time()
-db.sort('foo+bar+active', start=0, num=200, by='bar:*->ctive', store='qux')
+db.sort('foo+bar', start=0, num=200, by='baz:*->active', store='qux')
 print 'sort %.3fms' % (time.time() - start2)
 
 start2 = time.time()
-#print db.lrange('qux',  0, -1)
-print db.zrange('foo+bar+active',  0, 20)
+print db.lrange('qux',  0, 200)
+#print db.zrange('foo+bar+active',  0, 20)
 print '%.3fms' % (time.time() - start2)
 
 print 'total %.3fms' % (time.time() - total)

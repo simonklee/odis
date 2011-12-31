@@ -196,11 +196,11 @@ class Query(object):
         self.sort_opts = {}
         self.model = model
         self.db = model._db
+        self._hits = 0
 
     def _clone(self, zclone=False):
         if zclone:
             obj = ZQuery(self.model)
-            print "zquery"
         else:
             obj = self.__class__(self.model)
 
@@ -208,6 +208,7 @@ class Query(object):
         obj.inter = self.inter.copy()
         obj.sort = self.sort
         obj.sort_opts = self.sort_opts.copy()
+        obj._hits = self._hits
         return obj
 
     def count(self):
@@ -228,6 +229,7 @@ class Query(object):
             self.db.expireat(self.key, timestamp)
             return
 
+        self._hits = self._hits + 1
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
@@ -587,8 +589,12 @@ class Model(object):
             p.sadd(self.key_for('index', field=k, value=data[k]), data['pk'])
 
         for k in self._zindices:
-            r.zadd(self.key_for('zindex', field=k), data[k], data['pk'])
+            p.zadd(self.key_for('zindex', field=k), data[k], data['pk'])
 
+        for k in self._db.zrange(self.key_for('queries'), 0, -1):
+            p.delete(k)
+
+        p.delete(self.key_for('queries'))
         p.execute()
 
     def from_dict(self, data, to_python=False):

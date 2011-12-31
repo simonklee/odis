@@ -141,15 +141,46 @@ class QueryTestCase(unittest.TestCase):
             (qk.build_key({}, {}, 'Foo:username'), '~Foo_all^Foo:username',  'all+sort'),
         ])
 
+    def test_query_builder(self):
+        'Build query objects only from a key'
+
+    def test_cache(self):
+        qs = Bar.obj.filter(username='foo')
+        self.assertEqual(qs._cache, None)
+        self.assertEqual(len(qs), 1)
+        self.assertEqual(qs.query._hits, 1)
+        self.assertEqual(len(list(qs)), 1)
+        self.assertEqual(len(qs._cache), 1)
+        self.assertEqual(qs.query._hits, 1)
+
+        qs = qs.filter(username='bar')
+        self.assertEqual(qs._cache, None)
+        self.assertEqual(qs.query._hits, 1)
+        self.assertEqual(len(list(qs)), 1)
+        self.assertEqual(len(qs._cache), 1)
+        self.assertEqual(qs.query._hits, 2)
+
+        import ipdb
+        self.assertEqual(len(list(qs)), 1)
+        qs = qs.filter(username='bar')
+        self.assertEqual(qs._cache, None)
+        self.assertEqual(len(list(qs)), 1)
+        self.assertEqual(qs.query._hits, 2)
+
+        obj = list(qs)[0]
+        obj.username = 'qux'
+        obj.save()
+        ipdb.set_trace()
+
+        qs = qs.filter(username='bar')
+        self.assertEqual(qs._cache, None)
+        self.assertEqual(len(list(qs)), 0)
+        self.assertEqual(qs.query._hits, 3)
+
     def test_filter(self):
         self.runtests([
             (list(Bar.obj.filter(username='foo')), [self.b1], 'username=foo'),
-        ])
-
-    def test_chain(self):
-        res = list(Bar.obj.filter().exclude(username='bar'))
-        self.runtests([
-            (res, [self.b1, self.b3], 'filter all, exclude username'),
+            (list(Bar.obj.filter().exclude(username='bar')), [self.b1, self.b3], 'filter all, exclude username'),
             (list(Bar.obj.filter(username='bar').exclude(username='foo')), [self.b2], 'filter all, exclude username'),
         ])
 
