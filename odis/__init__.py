@@ -103,7 +103,7 @@ class Set(Collection):
 
     def _do(self, command, target, opts, expire=60):
         # seperate input
-        keys = [self.key] + QueryKey(self.model).sort_fields(opts)
+        keys = [self.key] + QueryKey(self.model).field_keys(opts)
 
         # then do the command
         command(target, *keys)
@@ -119,7 +119,7 @@ class Set(Collection):
 
 class Index(Set):
     def inter(self, **kwargs):
-        keys = QueryKey(self.model).sort_fields(kwargs)
+        keys = QueryKey(self.model).field_keys(kwargs)
 
         if len(keys) == 0:
             return self
@@ -129,7 +129,7 @@ class Index(Set):
             return Index(self.model, keys[0])
 
     def diff(self, **kwargs):
-        keys = QueryKey(self.model).sort_fields(kwargs)
+        keys = QueryKey(self.model).field_keys(kwargs)
 
         if len(keys) == 0:
             return self
@@ -140,7 +140,7 @@ class QueryKey(object):
     def __init__(self, model):
         self.model = model
 
-    def sort_fields(self, data):
+    def field_keys(self, data):
         keys = []
         sorted_keys = data.keys()
         sorted_keys.sort()
@@ -171,8 +171,8 @@ class QueryKey(object):
         '''The key is predefined based on the model,
         intersection, difference and sorting.'''
         key = '~' + self.model.key_for('all')
-        sorted_inter = self.sort_fields(inter)
-        sorted_diff = self.sort_fields(diff)
+        sorted_inter = self.field_keys(inter)
+        sorted_diff = self.field_keys(diff)
 
         if len(inter) > 0:
             key = key + '+' + '+'.join(sorted_inter)
