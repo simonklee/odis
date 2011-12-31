@@ -502,7 +502,7 @@ class BaseModel(type):
             'index': cls._namespace + '_index:{field}:{value}',
             'index': cls._namespace + '_index:{field}:{value}',
             'zindex': cls._namespace + '_zindex:{field}',
-            'indices': cls._namespace + '_indices',
+            'indices': cls._namespace + ':{pk}_indices',
             'queries': cls._namespace + '_cached_queries'}
 
         for k, v in attrs.iteritems():
@@ -587,7 +587,7 @@ class Model(object):
         p.sadd(self.key_for('all'), self.pk)
 
         # make sure we delete indices not more in use.
-        indices_key = self.key_for('indices')
+        indices_key = self.key_for('indices', pk=data['pk'])
         pattern = re.compile(r'%s_zindex\:' % self._namespace)
 
         for k in self._db.smembers(indices_key):
