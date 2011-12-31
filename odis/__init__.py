@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import re
 import redis
 import time
 import datetime
@@ -501,6 +502,7 @@ class BaseModel(type):
             'index': cls._namespace + '_index:{field}:{value}',
             'index': cls._namespace + '_index:{field}:{value}',
             'zindex': cls._namespace + '_zindex:{field}',
+            'indices': cls._namespace + '_indices',
             'queries': cls._namespace + '_cached_queries'}
 
         for k, v in attrs.iteritems():
@@ -583,17 +585,34 @@ class Model(object):
         p.hmset(self.key, data)
         # add pk to index for model
         p.sadd(self.key_for('all'), self.pk)
-        # update other indexes
-        # TODO: make sure we delete indices not more in use.
+
+        # make sure we delete indices not more in use.
+        indices_key = self.key_for('indices')
+        pattern = re.compile(r'%s_zindex\:' % self._namespace)
+
+        for k in self._db.smembers(indices_key):
+            if pattern.search(k):
+                p.zrem(k, data['pk'])
+            else:
+                p.srem(k, data['pk'])
+
+        # add all indexed keys to their index
         for k in self._indices:
-            p.sadd(self.key_for('index', field=k, value=data[k]), data['pk'])
+            key = self.key_for('index', field=k, value=data[k])
+            p.sadd(key, data['pk'])
+            p.sadd(indices_key, key)
 
+        # add all sorted set indexed keys to their index
         for k in self._zindices:
-            p.zadd(self.key_for('zindex', field=k), data[k], data['pk'])
+            key = self.key_for('zindex', field=k)
+            p.zadd(key, data[k], data['pk'])
+            p.sadd(indices_key, key)
 
+        # flush query cache for model
         for k in self._db.zrange(self.key_for('queries'), 0, -1):
             p.delete(k)
 
+        # del query cache key
         p.delete(self.key_for('queries'))
         p.execute()
 

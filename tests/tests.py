@@ -160,7 +160,6 @@ class QueryTestCase(unittest.TestCase):
         self.assertEqual(len(qs._cache), 1)
         self.assertEqual(qs.query._hits, 2)
 
-        import ipdb
         self.assertEqual(len(list(qs)), 1)
         qs = qs.filter(username='bar')
         self.assertEqual(qs._cache, None)
@@ -170,7 +169,6 @@ class QueryTestCase(unittest.TestCase):
         obj = list(qs)[0]
         obj.username = 'qux'
         obj.save()
-        ipdb.set_trace()
 
         qs = qs.filter(username='bar')
         self.assertEqual(qs._cache, None)
