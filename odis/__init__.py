@@ -141,6 +141,29 @@ class QueryKey(object):
     def __init__(self, model):
         self.model = model
 
+    def match_and_parse_key(self, key, data):
+        parts = self.parse_key(key)
+
+        if not self._match_key_parts(parts[1], data, False):
+            ok = False
+        elif not self._match_key_parts(parts[2], data, True):
+            ok = False
+        elif self.model.key_for('all') != parts[0][0]:
+            ok = False
+        else:
+            ok = True
+
+        return ok, parts
+
+    def _match_key_parts(self, parts, data, negate=False):
+        for part in parts:
+            model, field, value = part.split(':')
+
+            if (data[field] == value) is negate:
+                return False
+
+        return True
+
     def field_keys(self, data):
         keys = []
         sorted_keys = data.keys()
@@ -193,8 +216,9 @@ class Query(object):
         self.index = 0
         self.diff = {}
         self.inter = {}
-        self.sort = ''
+        self.sort_by = ''
         self.sort_opts = {}
+        self.sort_desc = False
         self.model = model
         self.db = model._db
         self._hits = 0
@@ -207,7 +231,8 @@ class Query(object):
 
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
-        obj.sort = self.sort
+        obj.sort_by = self.sort_by
+        obj.sort_desc = self.sort_desc
         obj.sort_opts = self.sort_opts.copy()
         obj._hits = self._hits
         return obj
@@ -223,7 +248,7 @@ class Query(object):
         if self.key:
             return
 
-        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort)
+        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
         timestamp = int(time.time() + 604800.0)
 
         if self.db.zadd(self.model.key_for('queries'), timestamp, self.key) == 0:
@@ -238,6 +263,9 @@ class Query(object):
         self.db.expireat(self.key, timestamp)
 
     def do_sort(self, index):
+        if len(self.sort_by) == 0:
+            self.add_sorting(self.model.key_for('obj', pk='*->pk'), {})
+
         self.sort_opts['store'] = self.key
         index.sort(**self.sort_opts)
 
@@ -272,7 +300,8 @@ class Query(object):
         return self
 
     def add_sorting(self, field, opts):
-        self.sort = field
+        self.sort_by = field
+        self.sort_desc = opts.pop('desc', False)
         self.sort_opts = opts
 
 class ZQuery(Query):
@@ -284,7 +313,7 @@ class ZQuery(Query):
         return self.llen
 
     def do_sort(self, index):
-        self.db.zinterstore(self.key, [self.sort])
+        self.db.zinterstore(self.key, [self.sort_by])
 
     def new_chunk(self, start, stop):
         p = self.db.pipeline()
@@ -333,13 +362,10 @@ class QuerySet(object):
         return c
 
     def iterator(self):
-        self._resolve_order()
-
         for data in self.query.result_iter():
             yield self.model().from_dict(data, to_python=True)
 
     def __len__(self):
-        self._resolve_order()
         return self.query.count()
 
     def __getitem__(self, key):
@@ -358,12 +384,6 @@ class QuerySet(object):
     def _clone(self, *args, **kwargs):
         return self.__class__(self.model, query=self.query._clone(*args, **kwargs))
 
-    def _resolve_order(self):
-        if len(self.query.sort) > 0:
-            return
-
-        self.query = self.query._clone()
-        self.query.add_sorting(self.model.key_for('obj', pk='*->pk'), {})
 
     def _cache_iter(self):
         pos = 0

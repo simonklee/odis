@@ -133,7 +133,6 @@ class QueryTestCase(unittest.TestCase):
 
     def test_key_builder(self):
         qk = QueryKey(Foo)
-
         self.runtests([
             (qk.build_key({}, {}, ''), '~Foo_all',  'all'),
             (qk.build_key({'username': 'foo'}, {}, ''), '~Foo_all+Foo_index:username:foo',  'all+inter'),
@@ -141,8 +140,23 @@ class QueryTestCase(unittest.TestCase):
             (qk.build_key({}, {}, 'Foo:username'), '~Foo_all^Foo:username',  'all+sort'),
         ])
 
-    def test_query_builder(self):
-        'Build query objects only from a key'
+    def test_key_matcher(self):
+        qk = QueryKey(Bar)
+
+        tests = [
+            ('~Bar_all', self.b1, True),
+            ('~Foo_all', self.b1, False),
+            ('~Bar_all^Bar:username', self.b1, True),
+            ('~Bar_all+Bar_index:username:foo', self.b1, True),
+            ('~Bar_all+Bar_index:username:foo+Bar:pk:1', self.b1, True),
+            ('~Bar_all+Bar_index:username:foo-Bar:pk:2', self.b1, True),
+            ('~Bar_all+Bar_index:username:foo+Bar:pk:2', self.b1, False),
+            ('~Bar_all+Bar_index:username:foo+Bar:pk:1^Bar:created_at', self.b1, True),
+        ]
+
+        for key, obj, expected in tests:
+            ok, parts = qk.match_and_parse_key(key, obj.as_dict(to_db=True))
+            self.assertEqual(ok, expected)
 
     def test_cache(self):
         qs = Bar.obj.filter(username='foo')
