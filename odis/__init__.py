@@ -73,7 +73,6 @@ class Collection(object):
 
 class Set(Collection):
     def __len__(self):
-        """``x.__len__() <==> len(x)``"""
         return self.db.scard(self.key)
 
     def __iter__(self):
@@ -91,18 +90,18 @@ class Set(Collection):
     #    return self.model().from_dict(data, to_python=True)
 
     def diff(self, **kwargs):
-        return self._do(
+        return self._apply_sort(
             self.db.sdiffstore,
             QueryKey(self.model).build_key({}, kwargs, ''),
             kwargs)
 
     def inter(self, **kwargs):
-        return self._do(
+        return self._apply_sort(
             self.db.sinterstore,
             QueryKey(self.model).build_key(kwargs, {}, ''),
             kwargs)
 
-    def _do(self, command, target, opts, expire=60):
+    def _apply_sort(self, command, target, opts, expire=60):
         # seperate input
         keys = [self.key] + QueryKey(self.model).field_keys(opts)
 
@@ -136,6 +135,56 @@ class Index(Set):
             return self
         else:
             return super(Index, self).diff(**kwargs)
+
+class SortedSet(Collection):
+    def __getitem__(self, key):
+        if getattr(self, 'sort_desc', False):
+            func = self.db.zrevrange
+        else:
+            func = self.db.zrange
+
+        if isinstance(key, (slice)):
+            start = key.start or 0
+
+            if key.stop and key.stop > 0:
+                stop = key.stop - 1
+            else:
+                stop = key.stop or -1
+
+            return func(self.key, start, stop)
+        else:
+            return func(self.key, key, key)[0]
+
+    def reversed_slice(self, start=None, stop=None):
+        start = start or 0
+        stop = stop - 1 if stop else -1
+
+    def __len__(self):
+        return self.zcard(self.key)
+
+    def __iter__(self):
+        return self.zrange(self.key, 0, -1).__iter__()
+
+    def __reversed__(self):
+        return self.zrevrange(self.key, 0, -1).__iter__()
+
+    def __repr__(self):
+        return "<%s '%s'>" % (self.__class__.__name__, self.key)
+
+    def sort(self, by, **opts):
+        if len(by) == 0:
+            by = (self.key, )
+
+        self.sort_desc = opts.pop('desc', False)
+        return self.db.zinterstore(self.key, by, **opts)
+
+    def expireat(self, timestamp):
+        return self.db.expireat(self.key, timestamp)
+
+    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
+        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
+        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
+        'zscore', 'zunionstore')
 
 class QueryKey(object):
     def __init__(self, model):
@@ -192,8 +241,7 @@ class QueryKey(object):
             return self._parse_key_part(a, sep, res)
 
     def build_key(self, inter, diff, sort):
-        '''The key is predefined based on the model,
-        intersection, difference and sorting.'''
+        'The key is defined based on the model, inter, diff and sorting'
         key = '~' + self.model.key_for('all')
         sorted_inter = self.field_keys(inter)
         sorted_diff = self.field_keys(diff)
@@ -211,68 +259,61 @@ class QueryKey(object):
 
 class Query(object):
     def __init__(self, model):
-        self.key = None
-        self.llen = None
+        self.res = None
         self.index = 0
         self.diff = {}
         self.inter = {}
         self.sort_by = ''
         self.sort_opts = {}
-        self.sort_desc = False
         self.model = model
         self.db = model._db
         self._hits = 0
 
-    def _clone(self, zclone=False):
-        if zclone:
-            obj = ZQuery(self.model)
-        else:
-            obj = self.__class__(self.model)
-
+    def _clone(self):
+        obj = self.__class__(self.model)
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
-        obj.sort_desc = self.sort_desc
         obj.sort_opts = self.sort_opts.copy()
         obj._hits = self._hits
         return obj
 
     def count(self):
-        if not self.llen:
+        if not hasattr(self, '_len'):
             self.do_query()
-            self.llen = self.db.llen(self.key)
+            self._len = len(self.res)
 
-        return self.llen
+        return self._len
 
     def do_query(self):
-        if self.key:
+        if self.res:
             return
 
-        self.key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
+        key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
+        self.res = SortedSet(self.model, key)
         timestamp = int(time.time() + 604800.0)
 
-        if self.db.zadd(self.model.key_for('queries'), timestamp, self.key) == 0:
-            self.db.expireat(self.key, timestamp)
+        if self.db.zadd(self.model.key_for('queries'), timestamp, self.res.key) == 0:
+            self.res.expireat(timestamp)
             return
 
         self._hits = self._hits + 1
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
-        self.do_sort(diffed)
-        self.db.expireat(self.key, timestamp)
+        self.apply_sort(diffed)
+        self.res.expireat(timestamp)
 
-    def do_sort(self, index):
+    def apply_sort(self, index):
         if len(self.sort_by) == 0:
-            self.add_sorting(self.model.key_for('obj', pk='*->pk'), {})
+            self.add_sorting(self.model.key_for('zindex', field='pk'), {})
 
-        self.sort_opts['store'] = self.key
-        index.sort(**self.sort_opts)
+        self.res.sort([index.key, self.sort_by], **self.sort_opts)
 
     def new_chunk(self, start, stop):
         p = self.db.pipeline()
 
-        for pk in self.db.lrange(self.key, start, stop):
+        for pk in self.res[start:stop]:
             p.hgetall(self.model.key_for('obj', pk=pk))
 
         return p.execute()
@@ -297,31 +338,12 @@ class Query(object):
             self.diff.update(**kwargs)
         else:
             self.inter.update(**kwargs)
+
         return self
 
     def add_sorting(self, field, opts):
         self.sort_by = field
-        self.sort_desc = opts.pop('desc', False)
         self.sort_opts = opts
-
-class ZQuery(Query):
-    def count(self):
-        if not self.llen:
-            self.do_query()
-            self.llen = self.db.zcard(self.key)
-
-        return self.llen
-
-    def do_sort(self, index):
-        self.db.zinterstore(self.key, [self.sort_by])
-
-    def new_chunk(self, start, stop):
-        p = self.db.pipeline()
-
-        for pk in self.db.zrange(self.key, start, stop):
-            p.hgetall(self.model.key_for('obj', pk=pk))
-
-        return p.execute()
 
 class QuerySet(object):
     def __init__(self, model, query=None):
@@ -348,15 +370,11 @@ class QuerySet(object):
         else:
             opts['desc'] = False
 
-        if opts.pop('zindex', None) and field in self.model._zindices:
-            c = self._clone(zclone=True)
-            field = self.model.key_for('zindex', field=field)
-        elif field in self.model._fields:
+        if field in self.model._zindices:
             c = self._clone()
-            field = self.model.key_for('obj', pk='*->%s' % field)
-            opts['by'] = field
+            field = self.model.key_for('zindex', field=field)
         else:
-            raise ValidationError('currently only sortable by fields on this model')
+            raise ValidationError('Sortable only by sorted set indexed values')
 
         c.query.add_sorting(field, opts)
         return c
@@ -383,7 +401,6 @@ class QuerySet(object):
 
     def _clone(self, *args, **kwargs):
         return self.__class__(self.model, query=self.query._clone(*args, **kwargs))
-
 
     def _cache_iter(self):
         pos = 0
@@ -482,11 +499,13 @@ class DateTimeField(ZField):
         if self.is_empty(value) and self.auto_now_add:
             value = datetime.datetime.now()
             setattr(instance, self.name, value)
+
         super(DateTimeField, self).validate(instance, value)
 
     def to_python(self, value):
         if not isinstance(value, datetime.datetime):
             return datetime.datetime.fromtimestamp(float(value))
+
         return value
 
     def to_db(self, value):
@@ -496,6 +515,7 @@ class DateField(ZField):
     def to_python(self, value):
         if not isinstance(value, datetime.date):
             return datetime.date.fromtimestamp(float(value))
+
         return value
 
     def to_db(self, value):
@@ -503,7 +523,7 @@ class DateField(ZField):
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
-        attrs['pk'] = IntegerField(nil=True)
+        attrs['pk'] = IntegerField(nil=True, zindex=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
         cls._indices = []
@@ -519,7 +539,6 @@ class BaseModel(type):
             'pk': cls._namespace + '_pk',
             'all' : cls._namespace + '_all',
             'obj' : cls._namespace + ':{pk}',
-            'index': cls._namespace + '_index:{field}:{value}',
             'index': cls._namespace + '_index:{field}:{value}',
             'zindex': cls._namespace + '_zindex:{field}',
             'indices': cls._namespace + ':{pk}_indices',
@@ -656,34 +675,4 @@ class Model(object):
 
         return data
 
-#class SortedSet(Collection):
-#    def __getitem__(self, s):
-#        if isinstance(s, slice):
-#            start = s.start or 0
-#            stop = s.stop or -1
-#            stop = stop - 1
-#            return self.zrange(start, stop)
-#        else:
-#            return self.zrange(s, s)[0]
-#
-#    def __len__(self):
-#        """``x.__len__() <==> len(x)``"""
-#        return self.zcard(self.key)
-#
-#    def __iter__(self):
-#        return self.members.__iter__()
-#
-#    def __reversed__(self):
-#        return self.zrevrange(0, -1).__iter__()
-#
-#    def __repr__(self):
-#        return "<%s '%s' %s>" % (self.__class__.__name__, self.key, self.members)
-#
-#    @property
-#    def members(self):
-#        return self.zrange(0, -1)
-#
-#    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
-#        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
-#        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
-#        'zscore', 'zunionstore')
+
