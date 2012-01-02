@@ -199,8 +199,9 @@ class QueryTestCase(unittest.TestCase):
     def test_sorting(self):
         self.runtests([
             (list(Bar.obj.order('pk')), [self.b1, self.b2, self.b3], 'SORT by Bar:*->pk'),
+            (list(Bar.obj.order('created_at')), [self.b1, self.b2, self.b3], 'ZINTERSTORE Bar_zindex:created_at'),
+            (list(Bar.obj.order('-created_at')), [self.b3, self.b2, self.b1], 'ZINTERSTORE Bar_zindex:created_at'),
             (list(Bar.obj.order('username', alpha=True)), [self.b2, self.b3, self.b1], 'SORT by Bar:*->username'),
-            (list(Bar.obj.order('created_at')), [self.b1, self.b2, self.b3], 'ZINTERSTORE Bar_zindex:created_at')
         ])
 
     @unittest.skip('not implemented yet')

@@ -22,7 +22,7 @@ except ImportError:
 r = redis.StrictRedis(**config.REDIS_DATABASE)
 
 EMPTY_VALUES = (None, '', [], (), {})
-CHUNK_SIZE = 100
+CHUNK_SIZE = 50
 
 class ValidationError(Exception):
     'An error raised on validation'
@@ -156,7 +156,9 @@ class SortedSet(Collection):
             return func(self.key, key, key)[0]
 
     def __len__(self):
-        return self.zcard(self.key)
+        if not hasattr(self, '_len'):
+            self._len = self.zcard(self.key)
+        return self._len
 
     def __iter__(self):
         return self.zrange(self.key, 0, -1).__iter__()
@@ -275,11 +277,8 @@ class Query(object):
         return obj
 
     def count(self):
-        if not hasattr(self, '_len'):
-            self.do_query()
-            self._len = len(self.res)
-
-        return self._len
+        self.do_query()
+        return len(self.res)
 
     def do_query(self):
         if self.res:
