@@ -670,5 +670,3 @@ class Model(object):
                 data[name] = getattr(self, name)
 
         return data
-
-
