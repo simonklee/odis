@@ -155,10 +155,6 @@ class SortedSet(Collection):
         else:
             return func(self.key, key, key)[0]
 
-    def reversed_slice(self, start=None, stop=None):
-        start = start or 0
-        stop = stop - 1 if stop else -1
-
     def __len__(self):
         return self.zcard(self.key)
 
