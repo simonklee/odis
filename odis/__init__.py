@@ -137,8 +137,12 @@ class Index(Set):
             return super(Index, self).diff(**kwargs)
 
 class SortedSet(Collection):
+    def __init__(self, *args, **kwargs):
+        self.desc = kwargs.pop('desc', False)
+        super(SortedSet, self).__init__(*args, **kwargs)
+
     def __getitem__(self, key):
-        if getattr(self, 'sort_desc', False):
+        if self.desc:
             func = self.db.zrevrange
         else:
             func = self.db.zrange
@@ -173,7 +177,6 @@ class SortedSet(Collection):
         if len(by) == 0:
             by = (self.key, )
 
-        self.sort_desc = opts.pop('desc', False)
         return self.db.zinterstore(self.key, by, **opts)
 
     def expireat(self, timestamp):
@@ -262,7 +265,7 @@ class Query(object):
         self.diff = {}
         self.inter = {}
         self.sort_by = ''
-        self.sort_opts = {}
+        self.desc = False
         self.model = model
         self.db = model._db
         self._hits = 0
@@ -272,21 +275,24 @@ class Query(object):
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
-        obj.sort_opts = self.sort_opts.copy()
+        obj.desc = self.desc
         obj._hits = self._hits
         return obj
 
     def count(self):
-        self.do_query()
+        self.execute_query()
         return len(self.res)
 
-    def do_query(self):
+    def execute_query(self):
         if self.res:
             return
 
         key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
-        self.res = SortedSet(self.model, key)
+        self.res = SortedSet(self.model, key, desc=self.desc)
         timestamp = int(time.time() + 604800.0)
+
+        if len(self.sort_by) == 0:
+            self.add_sorting(self.model.key_for('zindex', field='pk'))
 
         if self.db.zadd(self.model.key_for('queries'), timestamp, self.res.key) == 0:
             self.res.expireat(timestamp)
@@ -296,14 +302,8 @@ class Query(object):
         base = Index(self.model, self.model.key_for('all'))
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
-        self.apply_sort(diffed)
+        self.res.sort([diffed.key, self.sort_by])
         self.res.expireat(timestamp)
-
-    def apply_sort(self, index):
-        if len(self.sort_by) == 0:
-            self.add_sorting(self.model.key_for('zindex', field='pk'), {})
-
-        self.res.sort([index.key, self.sort_by], **self.sort_opts)
 
     def new_chunk(self, start, stop):
         p = self.db.pipeline()
@@ -314,7 +314,7 @@ class Query(object):
         return p.execute()
 
     def fetch_values(self):
-        self.do_query()
+        self.execute_query()
 
         while self.index < self.count():
             val = self.new_chunk(self.index, self.index + CHUNK_SIZE)
@@ -336,9 +336,9 @@ class Query(object):
 
         return self
 
-    def add_sorting(self, field, opts):
+    def add_sorting(self, field, desc=False):
         self.sort_by = field
-        self.sort_opts = opts
+        self.desc = desc
 
 class QuerySet(object):
     def __init__(self, model, query=None):
@@ -358,12 +358,10 @@ class QuerySet(object):
         return c
 
     def order(self, field, *args, **kwargs):
-        opts = kwargs.copy()
-
         if field.startswith('-'):
-            field, opts['desc'] = field[1:], True
+            field, desc = field[1:], True
         else:
-            opts['desc'] = False
+            desc = False
 
         if field in self.model._zindices:
             c = self._clone()
@@ -371,7 +369,7 @@ class QuerySet(object):
         else:
             raise ValidationError('Sortable only by sorted set indexed values')
 
-        c.query.add_sorting(field, opts)
+        c.query.add_sorting(field, desc)
         return c
 
     def iterator(self):
@@ -619,7 +617,6 @@ class Model(object):
         p.hmset(self.key, data)
         # add pk to index for model
         p.sadd(self.key_for('all'), self.pk)
-
         # make sure we delete indices not more in use.
         indices_key = self.key_for('indices', pk=data['pk'])
         pattern = re.compile(r'%s_zindex\:' % self._namespace)
