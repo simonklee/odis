@@ -413,7 +413,7 @@ class QuerySet(object):
             c = self._clone()
             field = self.model.key_for('zindex', field=field)
         else:
-            raise ValidationError('Sortable only by sorted set indexed values')
+            raise FieldError('Sortable only by sorted set indexed values')
 
         c.query.add_sorting(field, desc)
         return c
