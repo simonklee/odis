@@ -298,12 +298,12 @@ class Query(object):
         if self.res:
             return
 
+        if len(self.sort_by) == 0:
+            self.add_sorting(self.model.key_for('zindex', field='pk'))
+
         key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
         self.res = SortedSet(self.model, key, desc=self.desc)
         timestamp = int(time.time() + 604800.0)
-
-        if len(self.sort_by) == 0:
-            self.add_sorting(self.model.key_for('zindex', field='pk'))
 
         if self.db.zadd(self.model.key_for('queries'), timestamp, self.res.key) == 0:
             self.res.expireat(timestamp)
