@@ -6,6 +6,7 @@ import time
 import datetime
 
 from . import config
+from .utils import s
 
 try:
     import odisconfig
@@ -28,10 +29,10 @@ class ValidationError(Exception):
     'An error raised on validation'
 
 class FieldError(Exception):
-    'An error raised on validation'
+    'An error raised on wrong field type'
 
 class EmptyError(Exception):
-    'An error raised on validation'
+    'An error raised on no result'
 
 class EMPTY:
     pass
@@ -261,7 +262,9 @@ class QueryKey(object):
 class Query(object):
     def __init__(self, model):
         self.res = None
-        self.index = 0
+        self.off = 0
+        self.base = 0
+        self.limit = None
         self.diff = {}
         self.inter = {}
         self.sort_by = ''
@@ -275,13 +278,21 @@ class Query(object):
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
+        obj.limit = self.limit
+        obj.base = self.base
         obj.desc = self.desc
         obj._hits = self._hits
         return obj
 
     def count(self):
+        'count = MIN(N - base, limit - base)'
         self.execute_query()
-        return len(self.res)
+        n = max(0, len(self.res) - self.base)
+
+        if self.limit:
+            n = min(n, self.limit - self.base)
+
+        return n
 
     def execute_query(self):
         if self.res:
@@ -315,10 +326,16 @@ class Query(object):
 
     def fetch_values(self):
         self.execute_query()
+        self.off = max(self.base, self.off)
 
-        while self.index < self.count():
-            val = self.new_chunk(self.index, self.index + CHUNK_SIZE)
-            self.index = self.index + CHUNK_SIZE
+        while self.off < self.base + self.count():
+            end = self.off + CHUNK_SIZE
+
+            if self.limit: #and self.limit >= self.count(): prevent endless loop
+                end = min(end, self.limit)
+
+            val = self.new_chunk(self.off, end)
+            self.off = end
             return val
 
         return []
@@ -327,6 +344,13 @@ class Query(object):
         for chunks in iter(self.fetch_values, []):
             for data in chunks:
                 yield data
+
+    def is_bound(self):
+        return self.base != 0 or self.limit != None
+
+    def add_bounds(self, base=0, limit=None):
+        self.base = base
+        self.limit = limit
 
     def add_query(self, negate, **kwargs):
         if negate:
@@ -348,14 +372,36 @@ class QuerySet(object):
         self._iter = None
 
     def filter(self, **kwargs):
-        c = self._clone()
-        c.query.add_query(False, **kwargs)
-        return c
+        return self._filter_or_exclude(False, **kwargs)
 
     def exclude(self, **kwargs):
+        return self._filter_or_exclude(True, **kwargs)
+
+    def _filter_or_exclude(self, negate, **kwargs):
+        assert not self.query.is_bound(), 'cannot filter once slice has been taken'
         c = self._clone()
-        c.query.add_query(True, **kwargs)
+        c.query.add_query(negate, **kwargs)
         return c
+
+    def get(self, **kwargs):
+        assert len(kwargs) == 1, 'only possible to get() by single key=value lookup'
+        key, value = kwargs.popitem()
+
+        if key == 'pk':
+            pk = value
+        else:
+            if not key in self.model._indices:
+                raise FieldError('`%s` is not a valid index field.' % key)
+
+            pk = r.srandmember(self.model.key_for('index', field=key, value=value))
+
+        data = r.hgetall(self.model.key_for('obj', pk=pk))
+
+        if not data:
+            raise EmptyError('`%s(%s=%s)` returned an empty result' %
+                    (self.model.__name__, key, pk or value))
+
+        return self.model().from_dict(data, to_python=True)
 
     def order(self, field, *args, **kwargs):
         if field.startswith('-'):
@@ -379,8 +425,27 @@ class QuerySet(object):
     def __len__(self):
         return self.query.count()
 
-    def __getitem__(self, key):
-        pass
+    def __getitem__(self, k):
+        if self._cache:
+            if self._iter:
+                if isinstance(k, slice):
+                    off = k.stop if k.stop else None
+                else:
+                    off = k + 1
+
+                if len(self._cache) < off:
+                    self._cache_fill(num=off - len(self._cache))
+
+            return self._cache[k]
+
+        qs = self._clone()
+
+        if isinstance(k, slice):
+            qs.query.add_bounds(base=k.start or 0, limit=k.stop)
+            return qs
+        else:
+            qs.query.add_bounds(base=k, limit=k+1)
+            return list(qs)[0]
 
     def __iter__(self):
         if self._cache is None:
@@ -411,9 +476,9 @@ class QuerySet(object):
             if len(self._cache) <= pos:
                 self._cache_fill()
 
-    def _cache_fill(self):
+    def _cache_fill(self, num=None):
         try:
-            for i in range(CHUNK_SIZE):
+            for i in range(num or CHUNK_SIZE):
                 self._cache.append(self._iter.next())
         except StopIteration:
             self._iter = None
@@ -516,7 +581,7 @@ class DateField(ZField):
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
-        attrs['pk'] = IntegerField(nil=True, zindex=True)
+        attrs['pk'] = IntegerField(nil=True, zindex=True, index=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
         cls._indices = []
