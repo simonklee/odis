@@ -180,14 +180,21 @@ class QueryTestCase(unittest.TestCase):
         self.assertEqual(len(list(qs)), 1)
         self.assertEqual(qs.query._hits, 2)
 
-        obj = list(qs)[0]
+        obj = qs[0]
         obj.username = 'qux'
         obj.save()
 
         qs = qs.filter(username='bar')
         self.assertEqual(qs._cache, None)
         self.assertEqual(len(list(qs)), 0)
-        self.assertEqual(qs.query._hits, 3)
+        self.assertEqual(qs.query._hits, 2)
+
+    def test_getitem(self):
+        for i, obj in enumerate(Bar.obj.filter()[1:3]):
+            self.assertEqual(obj.pk, i + 2)
+
+        self.assertEqual(Bar.obj.filter()[1:3].count(), 2)
+        self.assertEqual(Bar.obj.filter()[0], self.b1)
 
     def test_get(self):
         self.runtests([

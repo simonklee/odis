@@ -422,6 +422,9 @@ class QuerySet(object):
         for data in self.query.result_iter():
             yield self.model().from_dict(data, to_python=True)
 
+    def count(self):
+        return len(self._clone())
+
     def __len__(self):
         return self.query.count()
 
@@ -670,39 +673,76 @@ class Model(object):
         if self.pk is None:
             setattr(self, 'pk', self._db.incr(self.key_for('pk')))
 
-        self.write()
+        p = self._db.pipeline()
+        self.delete(write=False, pipe=p)
+        self.update_query_cache(write=False, pipe=p)
+        self.write(write=False, pipe=p)
+        p.execute()
         return True
 
-    def write(self):
-        data = self.as_dict(to_db=True)
-        p = self._db.pipeline()
+    def delete(self, write=True, pipe=None):
+        p = pipe or self._db.pipeline()
         # first we delete prior data
         p.delete(self.key)
+        # rm from index for model
+        p.srem(self.key_for('all'), self.pk)
+        # make sure we delete indices not more in use.
+        pattern = re.compile(r'%s_zindex\:' % self._namespace)
+
+        for k in self._db.smembers(self.key_for('indices', pk=self.pk)):
+            if pattern.search(k):
+                p.zrem(k, self.pk)
+            else:
+                p.srem(k, self.pk)
+
+        if write:
+            p.execute()
+
+    def write(self, write=True, pipe=None):
+        p = pipe or self._db.pipeline()
+        data = self.as_dict(to_db=True)
         # then we set the new data
         p.hmset(self.key, data)
         # add pk to index for model
         p.sadd(self.key_for('all'), self.pk)
-        # make sure we delete indices not more in use.
-        indices_key = self.key_for('indices', pk=data['pk'])
-        pattern = re.compile(r'%s_zindex\:' % self._namespace)
-
-        for k in self._db.smembers(indices_key):
-            if pattern.search(k):
-                p.zrem(k, data['pk'])
-            else:
-                p.srem(k, data['pk'])
 
         # add all indexed keys to their index
+        indices_key = self.key_for('indices', pk=self.pk)
         for k in self._indices:
             key = self.key_for('index', field=k, value=data[k])
-            p.sadd(key, data['pk'])
+            p.sadd(key, self.pk)
             p.sadd(indices_key, key)
 
         # add all sorted set indexed keys to their index
         for k in self._zindices:
             key = self.key_for('zindex', field=k)
-            p.zadd(key, data[k], data['pk'])
+            p.zadd(key, data[k], self.pk)
             p.sadd(indices_key, key)
+
+        if write:
+            p.execute()
+
+    def update_query_cache(self, write=True, pipe=None):
+        'we simply update the score for the query instead of flushing it'
+        p = pipe or self._db.pipeline()
+        data = self.as_dict(to_db=True)
+        keys = self._db.zrange(self.key_for('queries'), 0, -1)
+        qk = QueryKey(self)
+
+        for k in keys:
+            ok, parts = qk.match_and_parse_key(k, data)
+
+            if ok:
+                score_field = parts[3][0].split(':')[1]
+                p.zadd(k, data[score_field], self.pk)
+            else:
+                p.zrem(k, self.pk)
+
+        if write:
+            p.execute()
+
+    def flush_query_cache(self, write=True, pipe=None):
+        p = pipe or self._db.pipeline()
 
         # flush query cache for model
         for k in self._db.zrange(self.key_for('queries'), 0, -1):
@@ -710,7 +750,9 @@ class Model(object):
 
         # del query cache key
         p.delete(self.key_for('queries'))
-        p.execute()
+
+        if write:
+            p.execute()
 
     def from_dict(self, data, to_python=False):
         for name, field in self._fields.items():
