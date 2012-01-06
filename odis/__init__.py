@@ -1,9 +1,12 @@
+# -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
 import re
 import redis
 import time
 import datetime
+import itertools
+import functools
 
 from . import config
 from .utils import s
@@ -38,23 +41,27 @@ class EMPTY:
     pass
 
 class Collection(object):
-    '''Create a collection object saved in Redis.
-    `key` the redis key for collection.
-    `db` or `pipe` must be provided'''
-    def __init__(self, model, key):
+    def __init__(self, model, key, pipe=None, map_res=False, map_callback=None):
         self.model = model
-        self.db = model._db
+        self.key = key
+        self.db = pipe or model._db
+        self.map_res = map_res
+        self.map_callback = map_callback or self._map_callback if map_res else None
 
         if not self.db:
             raise Exception('No connection specified')
 
-        self.key = key
-
         for attr in self.METHODS:
-            setattr(self, attr, getattr(self.db, attr))
+            setattr(self, attr, functools.partial(getattr(self.db, attr), self.key))
 
-    def clear(self):
+    def flush(self):
         self.db.delete(self.key)
+
+    def add(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def delete(self, *members):
+        raise NotImplementedError
 
     def sort(self, **options):
         return self.db.sort(self.key, **options)
@@ -70,6 +77,10 @@ class Collection(object):
 
         return self.db.sort(self.key, **options)
 
+    def _map_callback(self, pk):
+        data = self.db.hgetall(self.model.key_for('obj', pk=pk))
+        return self.model().from_dict(data, to_python=True)
+
     METHODS = ()
 
 class Set(Collection):
@@ -77,8 +88,10 @@ class Set(Collection):
         return self.db.scard(self.key)
 
     def __iter__(self):
+        if self.map_res:
+            return itertools.imap(self.map_callback, self.db.smembers(self.key))
+
         return iter(self.db.smembers(self.key))
-        #return itertools.imap(self._map, self.db.smembers(self.key))
 
     def __contains__(self, value):
         return self.db.sismember(self.key, value)
@@ -86,25 +99,27 @@ class Set(Collection):
     def __repr__(self):
         return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.db.smembers(self.key))
 
-    #def _map(self, pk):
-    #    data = self.db.hgetall(self.model.key_for('obj', pk=pk))
-    #    return self.model().from_dict(data, to_python=True)
-
     def diff(self, **kwargs):
         return self._apply_sort(
             self.db.sdiffstore,
-            QueryKey(self.model).build_key({}, kwargs, ''),
+            QueryKey(self.model, self.key).build_key({}, kwargs, ''),
             kwargs)
 
     def inter(self, **kwargs):
         return self._apply_sort(
             self.db.sinterstore,
-            QueryKey(self.model).build_key(kwargs, {}, ''),
+            QueryKey(self.model, self.key).build_key(kwargs, {}, ''),
             kwargs)
+
+    def add(self, *members):
+        return self.db.sadd(self.key, *members)
+
+    def delete(self, *members):
+        return self.db.srem(self.key, *members)
 
     def _apply_sort(self, command, target, opts, expire=60):
         # seperate input
-        keys = [self.key] + QueryKey(self.model).field_keys(opts)
+        keys = [self.key] + QueryKey(self.model, self.key).field_keys(opts)
 
         # then do the command
         command(target, *keys)
@@ -120,7 +135,7 @@ class Set(Collection):
 
 class Index(Set):
     def inter(self, **kwargs):
-        keys = QueryKey(self.model).field_keys(kwargs)
+        keys = QueryKey(self.model, self.key).field_keys(kwargs)
 
         if len(keys) == 0:
             return self
@@ -130,7 +145,7 @@ class Index(Set):
             return Index(self.model, keys[0])
 
     def diff(self, **kwargs):
-        keys = QueryKey(self.model).field_keys(kwargs)
+        keys = QueryKey(self.model, self.key).field_keys(kwargs)
 
         if len(keys) == 0:
             return self
@@ -156,23 +171,43 @@ class SortedSet(Collection):
             else:
                 stop = key.stop or -1
 
+            if self.map_res:
+                return map(self.map_callback, func(self.key, start, stop))
+
             return func(self.key, start, stop)
         else:
-            return func(self.key, key, key)[0]
+            obj = func(self.key, key, key)[0]
+
+            if self.map_res:
+                return self.map_callback(obj)
+
+            return obj
 
     def __len__(self):
         if not hasattr(self, '_len'):
-            self._len = self.zcard(self.key)
+            self._len = self.db.zcard(self.key)
         return self._len
 
     def __iter__(self):
-        return self.zrange(self.key, 0, -1).__iter__()
+        if self.map_res:
+            return itertools.imap(self.map_callback, self.db.zrange(self.key, 0, -1))
+
+        return iter(self.db.zrange(self.key, 0, -1))
 
     def __reversed__(self):
-        return self.zrevrange(self.key, 0, -1).__iter__()
+        if self.map_res:
+            return itertools.imap(self.map_callback, self.db.zrevrange(self.key, 0, -1))
+
+        return self.db.zrevrange(self.key, 0, -1).__iter__()
 
     def __repr__(self):
         return "<%s '%s'>" % (self.__class__.__name__, self.key)
+
+    def add(self, score, member):
+        self.db.zadd(self.key, score, member)
+
+    def delete(self, *members):
+        return self.db.zrem(self.key, *members)
 
     def sort(self, by, **opts):
         if len(by) == 0:
@@ -189,17 +224,22 @@ class SortedSet(Collection):
         'zscore', 'zunionstore')
 
 class QueryKey(object):
-    def __init__(self, model):
+    def __init__(self, model, base_key=None):
         self.model = model
+        self.base_key = base_key or model.key_for('all')
 
     def match_and_parse_key(self, key, data):
         parts = self.parse_key(key)
 
-        if not self._match_key_parts(parts[1], data, False):
+        base = parts[0][0].split(':')
+
+        if len(base) > 1:
+            ok = False
+        elif self.base_key != base[0]:
+            ok = False
+        elif not self._match_key_parts(parts[1], data, False):
             ok = False
         elif not self._match_key_parts(parts[2], data, True):
-            ok = False
-        elif self.model.key_for('all') != parts[0][0]:
             ok = False
         else:
             ok = True
@@ -244,7 +284,7 @@ class QueryKey(object):
 
     def build_key(self, inter, diff, sort):
         'The key is defined based on the model, inter, diff and sorting'
-        key = '~' + self.model.key_for('all')
+        key = '~' + self.base_key
         sorted_inter = self.field_keys(inter)
         sorted_diff = self.field_keys(diff)
 
@@ -260,7 +300,7 @@ class QueryKey(object):
         return key
 
 class Query(object):
-    def __init__(self, model):
+    def __init__(self, model, base_key, default_sort):
         self.res = None
         self.off = 0
         self.base = 0
@@ -268,13 +308,15 @@ class Query(object):
         self.diff = {}
         self.inter = {}
         self.sort_by = ''
+        self.default_sort = default_sort
         self.desc = False
         self.model = model
+        self.base_key = base_key
         self.db = model._db
         self._hits = 0
 
     def _clone(self):
-        obj = self.__class__(self.model)
+        obj = self.__class__(self.model, self.base_key, self.default_sort)
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
@@ -294,14 +336,24 @@ class Query(object):
 
         return n
 
+    def requires_query(self):
+        '''This only applies if we have specified default sort
+        and an empty queryset is executed'''
+        return not (len(self.sort_by) == 0 and self.default_sort == True \
+                and len(self.inter) + len(self.diff) == 0)
+
     def execute_query(self):
         if self.res:
             return
 
-        if len(self.sort_by) == 0:
+        if len(self.sort_by) == 0 and not self.default_sort:
             self.add_sorting(self.model.key_for('zindex', field='pk'))
 
-        key = QueryKey(self.model).build_key(self.inter, self.diff, self.sort_by)
+        if not self.requires_query():
+            self.res = SortedSet(self.model, self.base_key, desc=self.desc)
+            return
+
+        key = QueryKey(self.model, self.base_key).build_key(self.inter, self.diff, self.sort_by)
         self.res = SortedSet(self.model, key, desc=self.desc)
         timestamp = int(time.time() + 604800.0)
 
@@ -310,9 +362,10 @@ class Query(object):
             return
 
         self._hits = self._hits + 1
-        base = Index(self.model, self.model.key_for('all'))
+        base = Index(self.model, self.base_key)
         intersected = base.inter(**self.inter)
         diffed = intersected.diff(**self.diff)
+
         self.res.sort([diffed.key, self.sort_by])
         self.res.expireat(timestamp)
 
@@ -365,9 +418,9 @@ class Query(object):
         self.desc = desc
 
 class QuerySet(object):
-    def __init__(self, model, query=None):
+    def __init__(self, model, key=None, query=None, default_sort=False):
         self.model = model
-        self.query = query or Query(model)
+        self.query = query or Query(model, base_key=key or model.key_for('all'), default_sort=default_sort)
         self._cache = None
         self._iter = None
 
@@ -402,6 +455,11 @@ class QuerySet(object):
                     (self.model.__name__, key, pk or value))
 
         return self.model().from_dict(data, to_python=True)
+
+    def desc(self):
+        c = self._clone()
+        c.query.desc = True
+        return c
 
     def order(self, field, *args, **kwargs):
         if field.startswith('-'):
@@ -460,8 +518,13 @@ class QuerySet(object):
 
         return iter(self._cache)
 
+    def _flush_local_cache(self):
+        self._cache = None
+        self._iter = None
+        self.query = self.query._clone()
+
     def _clone(self, *args, **kwargs):
-        return self.__class__(self.model, query=self.query._clone(*args, **kwargs))
+        return self.__class__(self.model, query=self.query._clone())
 
     def _cache_iter(self):
         pos = 0
@@ -488,10 +551,11 @@ class QuerySet(object):
 
 class Field(object):
     def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
-        '''An attribute field on a model.
-
-        `index`: if set the value is used create an additional key which maps to
-        `pk`. This makes it possible to find pk by this field attribute.'''
+        '''
+        `index`:   Key for value maps to `pk`. lookup by value possible.
+        `unique`:  Only one model with a given value.
+        `nil`:     Allow nil value.
+        `default`: Set to default value if otherwise empty. '''
         self.unique = unique
         self.index = index or unique
         self.nil = nil
@@ -582,6 +646,95 @@ class DateField(ZField):
     def to_db(self, value):
         return u'%f' % time.mktime(value.timetuple())
 
+class CollectionField(object):
+    def __set__(self, instance, value):
+        return setattr(instance, '_' + self.name, value)
+
+    def __get__(self, instance, owner):
+        assert instance, 'can only be called on instance obj'
+        attr = '_' + self.name
+
+        if hasattr(instance, attr):
+            field = getattr(instance, attr)
+        else:
+            setattr(instance, attr, self.name)
+            field = self.name
+
+        return field
+
+class BaseSetField(CollectionField):
+    def __init__(self, rel_model=None, *args, **kwargs):
+        self.rel_model = rel_model
+
+    def __get__(self, instance, owner):
+        field = super(BaseSetField, self).__get__(instance, owner)
+        key = instance.key_for(self.key_type, pk=instance.pk, field=field)
+
+        if self.rel_model:
+            return self.datastructure(self.rel_model, key, map_res=True)
+
+        return self.datastructure(instance.__class__, key)
+
+class SetField(BaseSetField):
+    'set of values which can be pks and map to a different model or map to a type'
+    datastructure = Set
+    key_type = 'set'
+
+class SortedSetField(BaseSetField):
+    'sorted set of values which can be pks and map to a different model'
+    datastructure = SortedSet
+    key_type = 'sortedset'
+
+class BaseRelField(CollectionField):
+    def __init__(self, rel_model, *args, **kwargs):
+        self.rel_model = rel_model
+        self.default_sort = kwargs.pop('default_sort', True)
+
+    def __get__(self, instance, owner):
+        field = super(BaseRelField, self).__get__(instance, owner)
+        other_key = self.rel_model.key_for(self.key_type, field=field)
+        key = instance.key_for('compose', pk=instance.pk, other=other_key)
+        ds = self.datastructure(self.rel_model, key)
+
+        class RelQuerySet(QuerySet):
+            def add(self, *objs):
+                'one or more `(score, obj)` or one or more `obj` depending on field type'
+                for obj in objs:
+                    if isinstance(obj, (list, tuple)):
+                        if not isinstance(obj[1], self.model):
+                            raise TypeError('invalid model')
+
+                        ds.add(obj[0], obj[1].pk)
+                        obj[1].save()
+                    else:
+                        if not isinstance(obj, self.model):
+                            raise TypeError('invalid model')
+
+                        ds.add(obj.pk)
+                        obj.save()
+
+            def delete(self, *objs):
+                for obj in objs:
+                    if not isinstance(obj, self.model):
+                        raise TypeError('invalid model')
+
+                    ds.delete(obj.pk)
+                    obj.save()
+
+                self._flush_local_cache()
+
+        return RelQuerySet(self.rel_model, key=key, default_sort=self.default_sort)
+
+class RelSetField(BaseRelField):
+    'set of pks which maps to a different model and exposes the a QuerySet'
+    datastructure = Set
+    key_type='index'
+
+class RelSortedSetField(BaseRelField):
+    'sorted set of pks which maps to a different model and exposes the a QuerySet'
+    datastructure = SortedSet
+    key_type='zindex'
+
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
         attrs['pk'] = IntegerField(nil=True, zindex=True, index=True)
@@ -603,7 +756,11 @@ class BaseModel(type):
             'index': cls._namespace + '_index:{field}:{value}',
             'zindex': cls._namespace + '_zindex:{field}',
             'indices': cls._namespace + ':{pk}_indices',
-            'queries': cls._namespace + '_cached_queries'}
+            'queries': cls._namespace + '_cached_queries',
+            'zindex': cls._namespace + '_zindex:{field}',
+            'set': cls._namespace + ':{pk}_set:{field}',
+            'sortedset': cls._namespace + ':{pk}_sorted_set:{field}',
+            'compose': cls._namespace + u':{pk}:{other}'}
 
         for k, v in attrs.iteritems():
             if isinstance(v, Field):
@@ -615,6 +772,8 @@ class BaseModel(type):
 
                 if getattr(v, 'zindex', False):
                     cls._zindices.append(k)
+            elif isinstance(v, CollectionField):
+                v.name = k
 
         cls.obj = QuerySet(cls)
         return cls
@@ -764,12 +923,7 @@ class Model(object):
         return self
 
     def as_dict(self, to_db=False):
-        data = {}
+        if to_db:
+            return dict((k, f.to_db(getattr(self, k))) for k, f in self._fields.items())
 
-        for name, field in self._fields.items():
-            if to_db:
-                data[name] = field.to_db(getattr(self, name))
-            else:
-                data[name] = getattr(self, name)
-
-        return data
+        return dict((k, getattr(self, k)) for k in self._fields)

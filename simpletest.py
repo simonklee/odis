@@ -1,33 +1,39 @@
 import random
-import time
 
-from odis import Model, Field, DateTimeField, IntegerField
+from odis import Model, Field, RelSortedSetField, SortedSetField
+
 from odis.utils import s
 
 class Foo(Model):
     username = Field(index=True)
-    active = IntegerField(zindex=True, index=True, default=1)
-    created_at = DateTimeField(zindex=True, auto_now_add=True)
+
+class Bar(Model):
+    foos = RelSortedSetField(Foo)
+    col = SortedSetField(Foo)
 
 db = Foo._db
-#db.flushdb()
-#usernames = ['foo', 'bar', 'baz', 'qux', 'foobar', 'foobaz', 'fooqux', 'barfoo', 'barbar']
-#
-#for u in range(40000):
-#    Foo(username=random.choice(usernames), active=random.randint(0, 1)).save()
+db.flushdb()
+usernames = ['foo', 'bar', 'baz', 'qux', 'foobar', 'foobaz', 'fooqux', 'barfoo', 'barbar']
 
-total = time.time()
-#for username in usernames:
-#    list(Foo.obj.filter(username=username))
+for u in range(10):
+    Foo(username=random.choice(usernames), active=random.randint(0, 1)).save()
 
-list(Foo.obj.filter(active=1, username='foo')[:10])
-#list(Foo.obj.filter(active=1))
-#list(Foo.obj.order('active'))
-#list(Foo.obj.order('pk'))
-
-save = time.time()
-obj = Foo.obj.get(username='foo')
-obj.username = 'simon'
+obj = Bar()
 obj.save()
-print 'save %.3fms' % (time.time() - save)
-print 'total %.3fms' % (time.time() - total)
+#f1 = Foo.obj.get(pk=1)
+#f2 = Foo.obj.get(pk=2)
+#f3 = Foo.obj.get(pk=3)
+#obj.foos.add((1.2, f1))
+#obj.foos.add((1.3, f2))
+#print list(obj.foos.desc())
+#
+#obj.foos.add((1.1, f3))
+#qs = obj.foos
+#print list(qs)
+#qs.delete(f3)
+#print list(qs)
+
+obj.col.zadd(1.0, 1)
+obj.col.zadd(1.2, 2)
+
+print obj.col[1:]
