@@ -1,6 +1,6 @@
 import random
 
-from odis import Model, Field, RelSortedSetField, SortedSetField
+from odis import Model, Field, RelField, SortedSetField
 
 from odis.utils import s
 
@@ -8,7 +8,7 @@ class Foo(Model):
     username = Field(index=True)
 
 class Bar(Model):
-    foos = RelSortedSetField(Foo)
+    foos = RelField(Foo)
     col = SortedSetField(Foo)
 
 db = Foo._db

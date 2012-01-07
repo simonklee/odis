@@ -5,7 +5,9 @@ import sys
 import base64
 import os
 
-from odis import Model, Field, DateTimeField, r, Set, Index, IntegerField, QueryKey, EmptyError, FieldError
+from odis.utils import s
+from odis import (Model, r, Set, Index, IntegerField, QueryKey, EmptyError, FieldError,
+    Field, DateTimeField, SetField, SortedSetField, RelField)
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -17,6 +19,14 @@ class Foo(Model):
 class Bar(Model):
     username = Field(index=True, unique=True)
     created_at = DateTimeField(auto_now_add=True, zindex=True)
+
+class Baz(Model):
+    username = Field(unique=True)
+
+class Qux(Model):
+    sets = SetField(Baz)
+    sortedsets  = SortedSetField(Baz)
+    rel  = RelField(Baz)
 
 class ModelsTestCase(unittest.TestCase):
     def setUp(self):
@@ -94,6 +104,12 @@ class ModelsTestCase(unittest.TestCase):
 class FieldTestCase(unittest.TestCase):
     def setUp(self):
         r.flushdb()
+        self.users = []
+
+        for name in ['foo', 'bar', 'baz', 'qux']:
+            b = Baz(username=name)
+            b.save()
+            self.users.append(b)
 
     @unittest.skip('known datetime bug')
     def test_datetimefield(self):
@@ -104,7 +120,29 @@ class FieldTestCase(unittest.TestCase):
             username='bar',
             created_at=datetime.datetime(2011, 12, 29, 13, 30, 24, 91981))
 
-        self.assertEquals(b2.created_at, b1.created_at)
+        b2.save()
+        b1.save()
+        self.assertEquals(b1.created_at, b2.created_at)
+        self.assertEquals(Bar.obj.get(pk=b1.pk).created_at, Bar.obj.get(pk=b2.pk).created_at)
+
+    def test_setfield(self):
+        q = Qux()
+        q.save()
+        q.sets.sadd(*[u.pk for u in self.users[:2]])
+        self.assertEqual(list(q.sets), self.users[:2])
+
+    def test_sortedsetfield(self):
+        q = Qux()
+        q.save()
+        q.sortedsets.zadd(1.0, self.users[0].pk)
+        q.sortedsets.zadd(0.2, self.users[1].pk)
+        self.assertEqual(list(q.sortedsets), [self.users[1], self.users[0]])
+
+    def test_relfield(self):
+        q = Qux()
+        q.save()
+        q.rel.add(*[(u.pk, u) for u in self.users[:2]])
+        self.assertEqual(list(q.rel), self.users[:2])
 
 class QueryTestCase(unittest.TestCase):
     def setUp(self):

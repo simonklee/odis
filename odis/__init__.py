@@ -89,7 +89,7 @@ class Set(Collection):
 
     def __iter__(self):
         if self.map_res:
-            return itertools.imap(self.map_callback, self.db.smembers(self.key))
+            return itertools.imap(self.map_callback, iter(self.db.smembers(self.key)))
 
         return iter(self.db.smembers(self.key))
 
@@ -685,37 +685,37 @@ class SortedSetField(BaseSetField):
     datastructure = SortedSet
     key_type = 'sortedset'
 
-class BaseRelField(CollectionField):
+class RelField(CollectionField):
+    'sorted set of pks which maps to a different model and exposes the a QuerySet'
+    key_type='rel'
+
     def __init__(self, rel_model, *args, **kwargs):
         self.rel_model = rel_model
         self.default_sort = kwargs.pop('default_sort', True)
 
     def __get__(self, instance, owner):
-        field = super(BaseRelField, self).__get__(instance, owner)
-        other_key = self.rel_model.key_for(self.key_type, field=field)
-        key = instance.key_for('compose', pk=instance.pk, other=other_key)
-        ds = self.datastructure(self.rel_model, key)
+        field = super(RelField, self).__get__(instance, owner)
+        rel_model = self.rel_model
+        key = instance.key_for(
+            self.key_type,
+            pk=instance.pk,
+            field=field,
+            other=rel_model.key_for('pk'))
+        ds = SortedSet(rel_model, key)
 
         class RelQuerySet(QuerySet):
             def add(self, *objs):
-                'one or more `(score, obj)` or one or more `obj` depending on field type'
+                'one or more `(score, obj)`'
                 for obj in objs:
-                    if isinstance(obj, (list, tuple)):
-                        if not isinstance(obj[1], self.model):
-                            raise TypeError('invalid model')
+                    if not isinstance(obj[1], rel_model):
+                        raise TypeError('invalid model')
 
-                        ds.add(obj[0], obj[1].pk)
-                        obj[1].save()
-                    else:
-                        if not isinstance(obj, self.model):
-                            raise TypeError('invalid model')
-
-                        ds.add(obj.pk)
-                        obj.save()
+                    ds.add(float(obj[0]), obj[1].pk)
+                    obj[1].save()
 
             def delete(self, *objs):
                 for obj in objs:
-                    if not isinstance(obj, self.model):
+                    if not isinstance(obj, rel_model):
                         raise TypeError('invalid model')
 
                     ds.delete(obj.pk)
@@ -723,17 +723,7 @@ class BaseRelField(CollectionField):
 
                 self._flush_local_cache()
 
-        return RelQuerySet(self.rel_model, key=key, default_sort=self.default_sort)
-
-class RelSetField(BaseRelField):
-    'set of pks which maps to a different model and exposes the a QuerySet'
-    datastructure = Set
-    key_type='index'
-
-class RelSortedSetField(BaseRelField):
-    'sorted set of pks which maps to a different model and exposes the a QuerySet'
-    datastructure = SortedSet
-    key_type='zindex'
+        return RelQuerySet(rel_model, key=key, default_sort=self.default_sort)
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
@@ -757,10 +747,9 @@ class BaseModel(type):
             'zindex': cls._namespace + '_zindex:{field}',
             'indices': cls._namespace + ':{pk}_indices',
             'queries': cls._namespace + '_cached_queries',
-            'zindex': cls._namespace + '_zindex:{field}',
             'set': cls._namespace + ':{pk}_set:{field}',
-            'sortedset': cls._namespace + ':{pk}_sorted_set:{field}',
-            'compose': cls._namespace + u':{pk}:{other}'}
+            'sortedset': cls._namespace + ':{pk}_sortedset:{field}',
+            'rel': cls._namespace + ':{pk}_relset:{field}:{other}'}
 
         for k, v in attrs.iteritems():
             if isinstance(v, Field):

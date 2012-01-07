@@ -1,4 +1,5 @@
 ve/
 *.pyc
 *.coverage
+.noseids
 req.txt
