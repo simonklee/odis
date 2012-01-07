@@ -25,9 +25,10 @@ class Baz(Model):
 
 class Qux(Model):
     sets = SetField(Baz)
-    sets_float  = SetField(callback=float)
-    sortedsets  = SortedSetField(Baz)
-    rel  = RelField(Baz)
+    sets_float = SetField(callback=float)
+    sortedsets = SortedSetField(Baz)
+    sortedsets_str = SortedSetField(callback=str)
+    rel = RelField(Baz)
 
 class ModelsTestCase(unittest.TestCase):
     def test_dbkeys(self):
@@ -127,7 +128,7 @@ class FieldTestCase(unittest.TestCase):
         q.rel.add(*[(u.pk, u) for u in self.users[:2]])
         self.assertEqual(list(q.rel), self.users[:2])
 
-    def test_setswithtype(self):
+    def test_sets_with_type(self):
         q = Qux()
         q.save()
         values = [i * 1.0 for i in range(10)]
@@ -135,6 +136,16 @@ class FieldTestCase(unittest.TestCase):
         res = set(q.sets_float)
 
         for v in values:
+            self.assertEqual(v in res, True)
+
+        values = [(i, chr(i+65)) for i in range(26)]
+
+        for score, v in values:
+            q.sortedsets_str.zadd(score, v)
+
+        res = set(q.sortedsets_str)
+
+        for score, v in values:
             self.assertEqual(v in res, True)
 
 class QueryTestCase(unittest.TestCase):
