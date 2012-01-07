@@ -41,12 +41,12 @@ class EMPTY:
     pass
 
 class Collection(object):
-    def __init__(self, model, key, pipe=None, map_res=False, map_callback=None):
+    def __init__(self, model, key, pipe=None, map_res=False, callback=None):
         self.model = model
         self.key = key
         self.db = pipe or model._db
         self.map_res = map_res
-        self.map_callback = map_callback or self._map_callback if map_res else None
+        self.map_callback = callback or self._map_callback if map_res else None
 
         if not self.db:
             raise Exception('No connection specified')
@@ -663,8 +663,9 @@ class CollectionField(object):
         return field
 
 class BaseSetField(CollectionField):
-    def __init__(self, rel_model=None, *args, **kwargs):
+    def __init__(self, rel_model=None, callback=None, *args, **kwargs):
         self.rel_model = rel_model
+        self.callback = callback
 
     def __get__(self, instance, owner):
         field = super(BaseSetField, self).__get__(instance, owner)
@@ -672,6 +673,8 @@ class BaseSetField(CollectionField):
 
         if self.rel_model:
             return self.datastructure(self.rel_model, key, map_res=True)
+        elif self.callback:
+            return self.datastructure(instance.__class__, key, map_res=True, callback=self.callback)
 
         return self.datastructure(instance.__class__, key)
 

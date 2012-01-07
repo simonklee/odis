@@ -25,28 +25,11 @@ class Baz(Model):
 
 class Qux(Model):
     sets = SetField(Baz)
+    sets_float  = SetField(callback=float)
     sortedsets  = SortedSetField(Baz)
     rel  = RelField(Baz)
 
 class ModelsTestCase(unittest.TestCase):
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
-
-    #def test_compare(self):
-    #    r.flushdb()
-    #    for i in range(0, 100):
-    #        bb = Bar(username='%s' % i)
-    #        bb.save()
-
-    #    for i in range(0, 100):
-    #        ff = Foo(username='%s' % i, created_at=datetime.datetime.now())
-    #        ff.save()
-
-    #    print 'a'
-
     def test_dbkeys(self):
         f = Foo(username='foo', created_at=datetime.datetime.now())
         self.assertEqual(f.key_for('pk'), f._namespace + '_pk')
@@ -143,6 +126,16 @@ class FieldTestCase(unittest.TestCase):
         q.save()
         q.rel.add(*[(u.pk, u) for u in self.users[:2]])
         self.assertEqual(list(q.rel), self.users[:2])
+
+    def test_setswithtype(self):
+        q = Qux()
+        q.save()
+        values = [i * 1.0 for i in range(10)]
+        q.sets_float.sadd(*values)
+        res = set(q.sets_float)
+
+        for v in values:
+            self.assertEqual(v in res, True)
 
 class QueryTestCase(unittest.TestCase):
     def setUp(self):
@@ -270,9 +263,6 @@ class QueryTestCase(unittest.TestCase):
 class TypeTestCase(unittest.TestCase):
     def setUp(self):
         r.flushdb()
-
-    def tearDown(self):
-        pass
 
     def test_index(self):
         for name in ['foo', 'bar', 'baz']:
