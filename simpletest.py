@@ -15,9 +15,10 @@ db = Foo._db
 db.flushdb()
 usernames = ['foo', 'bar', 'baz', 'qux', 'foobar', 'foobaz', 'fooqux', 'barfoo', 'barbar']
 
-for u in range(10):
+for u in range(1000):
     Foo(username=random.choice(usernames), active=random.randint(0, 1)).save()
 
+s()
 obj = Bar()
 obj.save()
 #f1 = Foo.obj.get(pk=1)

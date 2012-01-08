@@ -6,8 +6,8 @@ import base64
 import os
 
 from odis.utils import s
-from odis import (Model, r, Set, Index, IntegerField, QueryKey, EmptyError, FieldError,
-    Field, DateTimeField, SetField, SortedSetField, RelField)
+from odis import (Model, r, Set, IntegerField, QueryKey, EmptyError, FieldError,
+    Field, DateTimeField, SetField, SortedSetField, RelField, SortedSet)
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -125,8 +125,10 @@ class FieldTestCase(unittest.TestCase):
     def test_relfield(self):
         q = Qux()
         q.save()
-        q.rel.add(*[(u.pk, u) for u in self.users[:2]])
-        self.assertEqual(list(q.rel), self.users[:2])
+        q.rel.add(*self.users[1:])
+        self.assertEqual(list(q.rel), self.users[1:])
+        self.assertEquals(q.rel[0], self.users[1])
+        self.assertEquals(q.rel.filter(username='bar')[0], self.users[1])
 
     def test_sets_with_type(self):
         q = Qux()
@@ -275,21 +277,40 @@ class TypeTestCase(unittest.TestCase):
     def setUp(self):
         r.flushdb()
 
-    def test_index(self):
-        for name in ['foo', 'bar', 'baz']:
-            Bar(username=name).save()
+    #def test_index(self):
+    #    for name in ['foo', 'bar', 'baz']:
+    #        Bar(username=name).save()
 
-        index = Index(Bar, Bar.key_for('all'))
-        self.assertEquals(list(index.inter(username='foo')), ['1'])
+    #    index = Index(Bar, Bar.key_for('all'))
+    #    self.assertEquals(list(index.inter(username='foo')), ['1'])
 
     def test_set(self):
         for name in ['foo', 'bar', 'baz']:
             Foo(username=name, created_at=datetime.datetime.now()).save()
 
-        s = Set(Foo, Foo.key_for('all'))
+        s = Set(Foo.key_for('all'))
 
         for i in range(1, 3):
             self.assertEqual(unicode(i) in s, True)
+
+    def test_sorted_set(self):
+        for name in ['foo', 'bar', 'baz', 'qux']:
+            Bar(username=name).save()
+
+        ss1 = SortedSet('scores')
+
+        for score, v in [(1.1, 1), (1.2, 2), (1.3, 3), (1.3, 4)]:
+            ss1.add(score, v)
+
+        ss2 = SortedSet('created_at')
+
+        for obj in list(Bar.obj):
+            data = obj.as_dict(to_db=True)
+            ss2.add(float(data['created_at']), data['pk'])
+
+        res = ss1.inter('target_key', [ss2.key])
+        s1 = Set(Bar.key_for('all'))
+
 
 class ScoreTestCase(unittest.TestCase):
     def setUp(self):

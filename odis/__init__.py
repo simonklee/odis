@@ -41,18 +41,29 @@ class EMPTY:
     pass
 
 class Collection(object):
-    def __init__(self, model, key, pipe=None, map_res=False, callback=None):
-        self.model = model
-        self.key = key
-        self.db = pipe or model._db
-        self.map_res = map_res
-        self.map_callback = callback or self._map_callback if map_res else None
+    METHODS = ()
 
-        if not self.db:
-            raise Exception('No connection specified')
+    def __init__(self, key, db=None, model=None, map_res=False, callback=None):
+        self.key = key
+        self.db = db or r
+
+        if map_res and not (model or callback):
+            raise ValueError('need callback or model paramater to perform map on results')
+
+        self.map_res = map_res
+        self.model = model
+        self.callback = callback or self.map_pk_to_model if map_res else None
 
         for attr in self.METHODS:
             setattr(self, attr, functools.partial(getattr(self.db, attr), self.key))
+
+    def _clone(self, key):
+        return self.__class__(
+            key,
+            db=self.db,
+            model=self.model,
+            map_res=self.map_res,
+            callback=self.callback)
 
     def flush(self):
         self.db.delete(self.key)
@@ -63,33 +74,20 @@ class Collection(object):
     def delete(self, *members):
         raise NotImplementedError
 
-    def sort(self, **options):
-        return self.db.sort(self.key, **options)
-
-    def sort_by(self, by, **options):
-        options['by'] = self.model.key_for('obj', pk='*->%s' % by)
-        get = options.pop('get', None)
-
-        if get:
-            if isinstance(get, (tuple, list)):
-                get = (self.model.key_for('obj', pk='*->%s' % get[0]), '#')
-            options['get'] = get
-
-        return self.db.sort(self.key, **options)
-
-    def _map_callback(self, pk):
+    def map_pk_to_model(self, pk):
         data = self.db.hgetall(self.model.key_for('obj', pk=pk))
         return self.model().from_dict(data, to_python=True)
 
-    METHODS = ()
-
 class Set(Collection):
+    METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
+        'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
+
     def __len__(self):
         return self.db.scard(self.key)
 
     def __iter__(self):
         if self.map_res:
-            return itertools.imap(self.map_callback, iter(self.db.smembers(self.key)))
+            return itertools.imap(self.callback, iter(self.db.smembers(self.key)))
 
         return iter(self.db.smembers(self.key))
 
@@ -97,19 +95,13 @@ class Set(Collection):
         return self.db.sismember(self.key, value)
 
     def __repr__(self):
-        return "<%s '%s' %s(%s)>" % (self.__class__.__name__, self.model.__name__, self.key, self.db.smembers(self.key))
+        return "<%s %s(%s)>" % (self.__class__.__name__, self.key, self.db.smembers(self.key))
 
-    def diff(self, **kwargs):
-        return self._apply_sort(
-            self.db.sdiffstore,
-            QueryKey(self.model, self.key).build_key({}, kwargs, ''),
-            kwargs)
+    def diff(self, target, keys):
+        return self._associative_op(self.db.sdiffstore, target, keys)
 
-    def inter(self, **kwargs):
-        return self._apply_sort(
-            self.db.sinterstore,
-            QueryKey(self.model, self.key).build_key(kwargs, {}, ''),
-            kwargs)
+    def inter(self, target, keys):
+        return self._associative_op(self.db.sinterstore, target, keys)
 
     def add(self, *members):
         return self.db.sadd(self.key, *members)
@@ -117,42 +109,28 @@ class Set(Collection):
     def delete(self, *members):
         return self.db.srem(self.key, *members)
 
-    def _apply_sort(self, command, target, opts, expire=60):
+    def _associative_op(self, command, target, keys, expire=60):
+        if len(keys) == 0:
+            return self
+
         # seperate input
-        keys = [self.key] + QueryKey(self.model, self.key).field_keys(opts)
+        keys = [self.key] + keys
 
         # then do the command
-        command(target, *keys)
+        command(target, keys)
 
         # key is just temporary
         self.db.expire(target, expire)
 
         # return the result as a new Set
-        return Set(self.model, target)
-
-    METHODS = ('sadd', 'scard', 'sdiff', 'sdiffstore', 'sinter', 'sinterstore', 'sismember',
-        'smembers', 'smove', 'spop', 'srandmember', 'srem', 'sunion', 'sunionstore')
-
-class Index(Set):
-    def inter(self, **kwargs):
-        keys = QueryKey(self.model, self.key).field_keys(kwargs)
-
-        if len(keys) == 0:
-            return self
-        elif len(keys) > 1:
-            return super(Index, self).inter(**kwargs)
-        else:
-            return Index(self.model, keys[0])
-
-    def diff(self, **kwargs):
-        keys = QueryKey(self.model, self.key).field_keys(kwargs)
-
-        if len(keys) == 0:
-            return self
-        else:
-            return super(Index, self).diff(**kwargs)
+        return self._clone(target)
 
 class SortedSet(Collection):
+    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
+        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
+        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
+        'zscore', 'zunionstore')
+
     def __init__(self, *args, **kwargs):
         self.desc = kwargs.pop('desc', False)
         super(SortedSet, self).__init__(*args, **kwargs)
@@ -172,14 +150,14 @@ class SortedSet(Collection):
                 stop = key.stop or -1
 
             if self.map_res:
-                return map(self.map_callback, func(self.key, start, stop))
+                return map(self.callback, func(self.key, start, stop))
 
             return func(self.key, start, stop)
         else:
             obj = func(self.key, key, key)[0]
 
             if self.map_res:
-                return self.map_callback(obj)
+                return self.callback(obj)
 
             return obj
 
@@ -190,24 +168,48 @@ class SortedSet(Collection):
 
     def __iter__(self):
         if self.map_res:
-            return itertools.imap(self.map_callback, self.db.zrange(self.key, 0, -1))
+            return itertools.imap(self.callback, self.db.zrange(self.key, 0, -1))
 
         return iter(self.db.zrange(self.key, 0, -1))
 
     def __reversed__(self):
         if self.map_res:
-            return itertools.imap(self.map_callback, self.db.zrevrange(self.key, 0, -1))
+            return itertools.imap(self.callback, self.db.zrevrange(self.key, 0, -1))
 
         return self.db.zrevrange(self.key, 0, -1).__iter__()
 
     def __repr__(self):
         return "<%s '%s'>" % (self.__class__.__name__, self.key)
 
+    def _clone(self, key):
+        c = super(SortedSet, self)._clone(key)
+        c.desc = self.desc
+        return c
+
+    def _associative_op(self, command, target, keys, expire=60):
+        # seperate input
+        keys = [self.key] + keys
+
+        # then do the command
+        command(target, keys)
+
+        # key is just temporary
+        self.db.expire(target, expire)
+
+        # return the result as a new Set
+        return self._clone(target)
+
     def add(self, score, member):
         self.db.zadd(self.key, score, member)
 
     def delete(self, *members):
         return self.db.zrem(self.key, *members)
+
+    def inter(self, target, keys):
+        return self._associative_op(self.db.zinterstore, target, keys)
+
+    def diff(self, target, keys):
+        return self._associative_op(self.db.zdiffstore, target, keys)
 
     def sort(self, by, **opts):
         if len(by) == 0:
@@ -217,11 +219,6 @@ class SortedSet(Collection):
 
     def expireat(self, timestamp):
         return self.db.expireat(self.key, timestamp)
-
-    METHODS = ('zadd', 'zcard', 'zcount', 'zincrby', 'zinterstore', 'zrange',
-        'zrangebyscore', 'zrank', 'zrem', 'zremrangebyrank',
-        'zremrangebyscore', 'zrevrange', 'zrevrangebyscore', 'zrevrank',
-        'zscore', 'zunionstore')
 
 class QueryKey(object):
     def __init__(self, model, base_key=None):
@@ -299,8 +296,15 @@ class QueryKey(object):
 
         return key
 
+    def build_and_field_keys(self, key_type, opts):
+        if key_type == 'inter':
+            return self.build_key(opts, {}, ''), self.field_keys(opts)
+        elif key_type == 'diff':
+            return self.build_key({}, opts, ''), self.field_keys(opts)
+        raise ValueError('key_type is unknown')
+
 class Query(object):
-    def __init__(self, model, base_key, default_sort):
+    def __init__(self, model, base_key):
         self.res = None
         self.off = 0
         self.base = 0
@@ -308,7 +312,6 @@ class Query(object):
         self.diff = {}
         self.inter = {}
         self.sort_by = ''
-        self.default_sort = default_sort
         self.desc = False
         self.model = model
         self.base_key = base_key
@@ -316,7 +319,7 @@ class Query(object):
         self._hits = 0
 
     def _clone(self):
-        obj = self.__class__(self.model, self.base_key, self.default_sort)
+        obj = self.__class__(self.model, self.base_key)
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
@@ -336,25 +339,15 @@ class Query(object):
 
         return n
 
-    def requires_query(self):
-        '''This only applies if we have specified default sort
-        and an empty queryset is executed'''
-        return not (len(self.sort_by) == 0 and self.default_sort == True \
-                and len(self.inter) + len(self.diff) == 0)
-
     def execute_query(self):
         if self.res:
             return
 
-        if len(self.sort_by) == 0 and not self.default_sort:
+        if len(self.sort_by) == 0:
             self.add_sorting(self.model.key_for('zindex', field='pk'))
 
-        if not self.requires_query():
-            self.res = SortedSet(self.model, self.base_key, desc=self.desc)
-            return
-
         key = QueryKey(self.model, self.base_key).build_key(self.inter, self.diff, self.sort_by)
-        self.res = SortedSet(self.model, key, desc=self.desc)
+        self.res = SortedSet(key, desc=self.desc)
         timestamp = int(time.time() + 604800.0)
 
         if self.db.zadd(self.model.key_for('queries'), timestamp, self.res.key) == 0:
@@ -362,11 +355,20 @@ class Query(object):
             return
 
         self._hits = self._hits + 1
-        base = Index(self.model, self.base_key)
-        intersected = base.inter(**self.inter)
-        diffed = intersected.diff(**self.diff)
 
-        self.res.sort([diffed.key, self.sort_by])
+        # base key for query
+        base = Set(self.base_key)
+
+        # do set intersect on base set and inter keys
+        target, keys = QueryKey(self.model, base.key).build_and_field_keys('inter', self.inter)
+        intersected = base.inter(target, keys)
+
+        # do set sym difference on result of intersection with diff keys
+        target, keys = QueryKey(self.model, intersected.key).build_and_field_keys('diff', self.diff)
+        diffed = intersected.diff(target, keys)
+
+        # only sort will create the final sorted set
+        self.res.sort({diffed.key:0, self.sort_by:1})
         self.res.expireat(timestamp)
 
     def new_chunk(self, start, stop):
@@ -418,9 +420,9 @@ class Query(object):
         self.desc = desc
 
 class QuerySet(object):
-    def __init__(self, model, key=None, query=None, default_sort=False):
+    def __init__(self, model, key=None, query=None):
         self.model = model
-        self.query = query or Query(model, base_key=key or model.key_for('all'), default_sort=default_sort)
+        self.query = query or Query(model, base_key=key or model.key_for('all'))
         self._cache = None
         self._iter = None
 
@@ -672,11 +674,11 @@ class BaseSetField(CollectionField):
         key = instance.key_for(self.key_type, pk=instance.pk, field=field)
 
         if self.rel_model:
-            return self.datastructure(self.rel_model, key, map_res=True)
+            return self.datastructure(key, model=self.rel_model, map_res=True)
         elif self.callback:
-            return self.datastructure(instance.__class__, key, map_res=True, callback=self.callback)
+            return self.datastructure(key, map_res=True, callback=self.callback)
 
-        return self.datastructure(instance.__class__, key)
+        return self.datastructure(key)
 
 class SetField(BaseSetField):
     'set of values which can be pks and map to a different model or map to a type'
@@ -694,7 +696,6 @@ class RelField(CollectionField):
 
     def __init__(self, rel_model, *args, **kwargs):
         self.rel_model = rel_model
-        self.default_sort = kwargs.pop('default_sort', True)
 
     def __get__(self, instance, owner):
         field = super(RelField, self).__get__(instance, owner)
@@ -704,17 +705,17 @@ class RelField(CollectionField):
             pk=instance.pk,
             field=field,
             other=rel_model.key_for('pk'))
-        ds = SortedSet(rel_model, key)
+        ds = Set(key)
 
         class RelQuerySet(QuerySet):
             def add(self, *objs):
                 'one or more `(score, obj)`'
                 for obj in objs:
-                    if not isinstance(obj[1], rel_model):
+                    if not isinstance(obj, rel_model):
                         raise TypeError('invalid model')
 
-                    ds.add(float(obj[0]), obj[1].pk)
-                    obj[1].save()
+                    ds.add(obj.pk)
+                    obj.save()
 
             def delete(self, *objs):
                 for obj in objs:
@@ -726,7 +727,7 @@ class RelField(CollectionField):
 
                 self._flush_local_cache()
 
-        return RelQuerySet(rel_model, key=key, default_sort=self.default_sort)
+        return RelQuerySet(rel_model, key=key)
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
