@@ -2,4 +2,5 @@ ve/
 *.pyc
 *.coverage
 .noseids
+odis.egg-info
 req.txt
