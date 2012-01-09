@@ -225,25 +225,66 @@ class QueryKey(object):
         self.model = model
         self.base_key = base_key or model.key_for('all')
 
-    def match_and_parse_key(self, key, data):
+    def match_and_parse_keys(self, keys, data):
+        'returns only ok keys in a dict where the value is the score field'
+        p = self.model._db.pipeline()
+        good = {}
+        async = []
+
+        # figure out if a key pattern matches the data. Some keys require
+        # to be evaluted by checking pk in a different set, we do this with
+        # pipe for all keys which require it, after the first run through.
+        for k in keys:
+            ok, parts, async_eval = self.match_and_parse_key(k, data, pipe=p)
+
+            if async_eval:
+                async.append(k)
+
+            if ok:
+                good[k] = parts[3][0].split(':')[1]
+
+        # remove any key which did not evalute after the
+        # async evaluation of keys which required it.
+        for i, ok in enumerate(p.execute()):
+            if not ok:
+                try:
+                    del good[async[i]]
+                except KeyError:
+                    pass
+
+        return good
+
+    def match_and_parse_key(self, key, data, pipe=None):
+        db = pipe or self.model._db
         parts = self.parse_key(key)
+        base_ok, async_eval = self._match_base_part(parts[0][0], data, db)
 
-        base = parts[0][0].split(':')
-
-        if len(base) > 1:
+        if not base_ok:
             ok = False
-        elif self.base_key != base[0]:
+        elif not self._match_associative_parts(parts[1], data, False):
             ok = False
-        elif not self._match_key_parts(parts[1], data, False):
-            ok = False
-        elif not self._match_key_parts(parts[2], data, True):
+        elif not self._match_associative_parts(parts[2], data, True):
             ok = False
         else:
             ok = True
 
-        return ok, parts
+        return ok, parts, (async_eval and not pipe is None)
 
-    def _match_key_parts(self, parts, data, negate=False):
+    def _match_base_part(self, base, data, db):
+        parts = base.split(':')
+
+        if len(parts) == 4 and self.base_key == parts[3]:
+            # if db is a redis pipe, running pipe.execute() returns
+            # a list of [true, true, false, ... ] for each key you
+            # match.
+            if db.sismember(base, data['pk']):
+                return True, True
+        elif self.base_key == parts[0]:
+            return True, False
+
+        return False, False
+
+    def _match_associative_parts(self, parts, data, negate=False):
         for part in parts:
             model, field, value = part.split(':')
 
@@ -422,7 +463,8 @@ class Query(object):
 class QuerySet(object):
     def __init__(self, model, key=None, query=None):
         self.model = model
-        self.query = query or Query(model, base_key=key or model.key_for('all'))
+        self.base_key = key or model.key_for('all')
+        self.query = query or Query(model, base_key=self.base_key)
         self._cache = None
         self._iter = None
 
@@ -450,12 +492,11 @@ class QuerySet(object):
 
             pk = r.srandmember(self.model.key_for('index', field=key, value=value))
 
-        data = r.hgetall(self.model.key_for('obj', pk=pk))
-
-        if not data:
+        if not r.sismember(self.base_key, pk):
             raise EmptyError('`%s(%s=%s)` returned an empty result' %
                     (self.model.__name__, key, pk or value))
 
+        data = r.hgetall(self.model.key_for('obj', pk=pk))
         return self.model().from_dict(data, to_python=True)
 
     def desc(self):
@@ -526,7 +567,7 @@ class QuerySet(object):
         self.query = self.query._clone()
 
     def _clone(self, *args, **kwargs):
-        return self.__class__(self.model, query=self.query._clone())
+        return self.__class__(self.model, key=self.base_key, query=self.query._clone())
 
     def _cache_iter(self):
         pos = 0
@@ -704,7 +745,7 @@ class RelField(CollectionField):
             self.key_type,
             pk=instance.pk,
             field=field,
-            other=rel_model.key_for('pk'))
+            other=rel_model.key_for('all'))
         ds = Set(key)
 
         class RelQuerySet(QuerySet):
@@ -826,13 +867,13 @@ class Model(object):
             setattr(self, 'pk', self._db.incr(self.key_for('pk')))
 
         p = self._db.pipeline()
-        self.delete(write=False, pipe=p)
+        self.delete(write=False, pipe=p, clean_cache=False)
         self.update_query_cache(write=False, pipe=p)
         self.write(write=False, pipe=p)
         p.execute()
         return True
 
-    def delete(self, write=True, pipe=None):
+    def delete(self, write=True, pipe=None, clean_cache=True):
         p = pipe or self._db.pipeline()
         # first we delete prior data
         p.delete(self.key)
@@ -846,6 +887,9 @@ class Model(object):
                 p.zrem(k, self.pk)
             else:
                 p.srem(k, self.pk)
+
+        if clean_cache:
+            self.flush_query_cache(pk=self.pk)
 
         if write:
             p.execute()
@@ -880,28 +924,30 @@ class Model(object):
         data = self.as_dict(to_db=True)
         keys = self._db.zrange(self.key_for('queries'), 0, -1)
         qk = QueryKey(self)
+        good = qk.match_and_parse_keys(keys, data)
 
         for k in keys:
-            ok, parts = qk.match_and_parse_key(k, data)
-
-            if ok:
-                score_field = parts[3][0].split(':')[1]
-                p.zadd(k, data[score_field], self.pk)
+            if k in good:
+                p.zadd(k, data[good[k]], self.pk)
             else:
                 p.zrem(k, self.pk)
 
         if write:
             p.execute()
 
-    def flush_query_cache(self, write=True, pipe=None):
+    def flush_query_cache(self, pk=None, write=True, pipe=None):
         p = pipe or self._db.pipeline()
+        queries = self._db.zrange(self.key_for('queries'), 0, -1)
 
-        # flush query cache for model
-        for k in self._db.zrange(self.key_for('queries'), 0, -1):
-            p.delete(k)
+        if pk:
+            for k in queries:
+                p.zrem(k, pk)
+        else:
+            for k in queries:
+                p.delete(k)
 
-        # del query cache key
-        p.delete(self.key_for('queries'))
+            # del query cache key
+            p.delete(self.key_for('queries'))
 
         if write:
             p.execute()

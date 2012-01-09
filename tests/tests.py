@@ -125,10 +125,21 @@ class FieldTestCase(unittest.TestCase):
     def test_relfield(self):
         q = Qux()
         q.save()
+        count = len(self.users[1:])
         q.rel.add(*self.users[1:])
+
+        # validate existance of users
         self.assertEqual(list(q.rel), self.users[1:])
+        self.assertEqual(len(q.rel), count)
+
+        # test filters with different base key
         self.assertEquals(q.rel[0], self.users[1])
         self.assertEquals(q.rel.filter(username='bar')[0], self.users[1])
+        self.assertRaises(EmptyError, q.rel.get, username='foo')
+
+        self.users.pop().delete()
+        count = count - 1
+        self.assertEquals(len(q.rel), count)
 
     def test_sets_with_type(self):
         q = Qux()
@@ -199,8 +210,69 @@ class QueryTestCase(unittest.TestCase):
         ]
 
         for key, obj, expected in tests:
-            ok, parts = qk.match_and_parse_key(key, obj.as_dict(to_db=True))
-            self.assertEqual(ok, expected)
+            ok, parts, async_eval = qk.match_and_parse_key(key, obj.as_dict(to_db=True))
+            self.assertEqual(ok and async_eval == False, expected)
+
+    def test_rel_key_matcher(self):
+        u1 = Baz(username='foo')
+        u1.save()
+        u2 = Baz(username='bar')
+        u2.save()
+
+        qk = QueryKey(Baz)
+        q = Qux()
+        q.save()
+        q.rel.add(u1)
+
+        qs = q.rel
+        self.assertEqual(len(qs), 1)
+        key = qs.query.res.key
+
+        p = r.pipeline()
+        ok, parts, async_eval = qk.match_and_parse_key(key, u1.as_dict(to_db=True), pipe=p)
+        self.assertEqual(ok, True)
+        self.assertEqual(async_eval, True)
+        self.assertEqual(True in p.execute(), True)
+
+        ok, parts, async_eval = qk.match_and_parse_key(key, u1.as_dict(to_db=True))
+        self.assertEqual(ok, True)
+        self.assertEqual(async_eval, False)
+        u = Baz(username='baz')
+        u.save()
+
+        p = r.pipeline()
+        ok, parts, async_eval = qk.match_and_parse_key(key, u2.as_dict(to_db=True), pipe=p)
+        self.assertEqual(ok, True)
+        self.assertEqual(async_eval, True)
+        # notice that this last question evaluates as False.
+        self.assertEqual(True in p.execute(), False)
+
+    def test_rel_keys_matcher(self):
+        u1 = Baz(username='foo')
+        u1.save()
+        u2 = Baz(username='bar')
+        u2.save()
+
+        qk = QueryKey(Baz)
+        q = Qux()
+        q.save()
+        q.rel.add(u1)
+
+        queries = (
+            (q.rel.filter(username='foo'), True),
+            (q.rel.filter(username='bar'), False)
+        )
+
+        tests = {}
+
+        for qs, expected in queries:
+            len(qs) # force eval
+            tests[qs.query.res.key] = expected
+
+        good = qk.match_and_parse_keys(tests.keys(), u1.as_dict(to_db=True))
+
+        for key, expected in tests.items():
+            self.assertEqual((key in good) is expected, True)
 
     def test_cache(self):
         qs = Bar.obj.filter(username='foo')
