@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='odis',
-    version='0.1.0',
+    version='0.0.2',
     description='simple models for redis',
     long_description=codecs.open('README', "r", "utf-8").read(),
     author='Simon Klee',
