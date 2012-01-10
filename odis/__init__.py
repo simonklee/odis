@@ -9,7 +9,7 @@ import itertools
 import functools
 
 from . import config
-from .utils import s
+from .utils import safe_bytestr, safe_unicode
 
 try:
     import odisconfig
@@ -646,6 +646,13 @@ class Field(object):
     def to_db(self, value):
         return value
 
+class CharField(Field):
+    def to_python(self, value):
+        return safe_unicode(value)
+
+    def to_db(self, value):
+        return safe_bytestr(value)
+
 class ZField(Field):
     def __init__(self, zindex=False, **kwargs):
         super(ZField, self).__init__(**kwargs)
@@ -656,7 +663,7 @@ class IntegerField(ZField):
         return int(value)
 
     def to_db(self, value):
-        return unicode(value)
+        return safe_bytestr(value)
 
 class DateTimeField(ZField):
     def __init__(self, auto_now_add=False, **kwargs):
@@ -832,7 +839,7 @@ class Model(object):
 
     @classmethod
     def key_for(cls, name, **kwargs):
-        return cls._keys[name].format(**kwargs)
+        return safe_bytestr(cls._keys[name].format(**kwargs))
 
     @property
     def key(self):
