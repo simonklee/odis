@@ -347,8 +347,8 @@ class QueryKey(object):
 class Query(object):
     def __init__(self, model, base_key):
         self.res = None
+        self.pos = 0
         self.off = 0
-        self.base = 0
         self.limit = None
         self.diff = {}
         self.inter = {}
@@ -365,18 +365,18 @@ class Query(object):
         obj.inter = self.inter.copy()
         obj.sort_by = self.sort_by
         obj.limit = self.limit
-        obj.base = self.base
+        obj.off = self.off
         obj.desc = self.desc
         obj._hits = self._hits
         return obj
 
     def count(self):
-        'count = MIN(N - base, limit - base)'
+        'count = MIN(N - off, limit - off)'
         self.execute_query()
-        n = max(0, len(self.res) - self.base)
+        n = max(0, len(self.res) - self.off)
 
         if self.limit:
-            n = min(n, self.limit - self.base)
+            n = min(n, self.limit - self.off)
 
         return n
 
@@ -422,16 +422,16 @@ class Query(object):
 
     def fetch_values(self):
         self.execute_query()
-        self.off = max(self.base, self.off)
+        self.pos = max(self.off, self.pos)
 
-        while self.off < self.base + self.count():
-            end = self.off + CHUNK_SIZE
+        while self.pos < self.off + self.count():
+            end = self.pos + CHUNK_SIZE
 
             if self.limit: #and self.limit >= self.count(): prevent endless loop
                 end = min(end, self.limit)
 
-            val = self.new_chunk(self.off, end)
-            self.off = end
+            val = self.new_chunk(self.pos, end)
+            self.pos = end
             return val
 
         return []
@@ -442,10 +442,10 @@ class Query(object):
                 yield data
 
     def is_bound(self):
-        return self.base != 0 or self.limit != None
+        return self.off != 0 or self.limit != None
 
-    def add_bounds(self, base=0, limit=None):
-        self.base = base
+    def add_bounds(self, off=0, limit=None):
+        self.off = off
         self.limit = limit
 
     def add_query(self, negate, **kwargs):
@@ -545,10 +545,10 @@ class QuerySet(object):
         qs = self._clone()
 
         if isinstance(k, slice):
-            qs.query.add_bounds(base=k.start or 0, limit=k.stop)
+            qs.query.add_bounds(off=k.start or 0, limit=k.stop)
             return qs
         else:
-            qs.query.add_bounds(base=k, limit=k+1)
+            qs.query.add_bounds(off=k, limit=k+1)
             return list(qs)[0]
 
     def __iter__(self):
