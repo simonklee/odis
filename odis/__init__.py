@@ -9,7 +9,7 @@ import itertools
 import functools
 
 from . import config
-from .utils import safe_bytestr, safe_unicode
+from .utils import safe_bytestr, safe_unicode, s
 
 try:
     import odisconfig
@@ -23,10 +23,69 @@ try:
 except ImportError:
     pass
 
-r = redis.StrictRedis(**config.REDIS_DATABASE)
 
 EMPTY_VALUES = (None, '', [], (), {})
 CHUNK_SIZE = 50
+
+class Redis(redis.StrictRedis):
+    RESPONSE_CALLBACKS = redis.client.dict_merge(
+        redis.StrictRedis.RESPONSE_CALLBACKS,
+        {
+            'EVAL': lambda r: itertools.imap(redis.client.pairs_to_dict, iter(r)),
+        }
+    )
+
+    hgetallref_lua = '''
+        local keys, argv = KEYS, ARGV
+        local obj_key = table.remove(keys, 1)
+        local pks = argv
+        local index = {}
+        local r = {}
+        local extra_keys = {}
+        local next = next
+
+        i = 1
+        while i < #keys do
+            table.insert(extra_keys, {member=keys[i], fmt=keys[i + 1]})
+            i = i + 2
+        end
+
+        for i, pk in ipairs(pks) do
+            local key = obj_key:gsub('{pk}', pk)
+            local obj = redis.call('hgetall', key)
+
+            --ignore empty results
+            if next(obj) ~= nil then
+                table.insert(r, obj)
+
+                --populate the index of keys location in the objects table, called once.
+                if #index == 0 and #extra_keys > 0 then
+                    for i, key in ipairs(obj) do
+                        index[key] = i + 1
+                    end
+                end
+
+                --for every extra related key we want to retrieve we add it after
+                --the current item.
+                for i, v in ipairs(extra_keys) do
+                    local key = v.fmt:gsub('{pk}', tostring(obj[index[v.member]]))
+                    table.insert(r, redis.call('hgetall', key))
+                end
+            end
+        end
+
+        return r
+        '''
+
+    def hgetallrel(self, name, pks, extra=None):
+        if not extra:
+            extra = []
+        else:
+            extra = list(itertools.chain.from_iterable(extra))
+
+        return self.execute_command('EVAL', self.hgetallref_lua, len(extra) + 1, name, *extra + pks)
+
+r = Redis(**config.REDIS_DATABASE)
 
 class ValidationError(Exception):
     'An error raised on validation'
@@ -352,6 +411,7 @@ class Query(object):
         self.limit = None
         self.diff = {}
         self.inter = {}
+        self.includes = []
         self.sort_by = ''
         self.desc = False
         self.model = model
@@ -363,6 +423,7 @@ class Query(object):
         obj = self.__class__(self.model, self.base_key)
         obj.diff = self.diff.copy()
         obj.inter = self.inter.copy()
+        obj.includes = self.includes[:]
         obj.sort_by = self.sort_by
         obj.limit = self.limit
         obj.off = self.off
@@ -413,12 +474,18 @@ class Query(object):
         self.res.expireat(timestamp)
 
     def new_chunk(self, start, stop):
+        if len(self.includes) > 0:
+            # do query using lua scripts to retrieve extra objects
+            # for each obj.
+            return self.db.hgetallrel(self.model._keys['obj'], self.res[start:stop], self.includes)
+
         p = self.db.pipeline()
 
         for pk in self.res[start:stop]:
             p.hgetall(self.model.key_for('obj', pk=pk))
 
         return p.execute()
+
 
     def fetch_values(self):
         self.execute_query()
@@ -438,8 +505,8 @@ class Query(object):
 
     def result_iter(self):
         for chunks in iter(self.fetch_values, []):
-            for data in chunks:
-                yield data
+            for chunk in chunks:
+                yield chunk
 
     def is_bound(self):
         return self.off != 0 or self.limit != None
@@ -460,6 +527,9 @@ class Query(object):
         self.sort_by = field
         self.desc = desc
 
+    def add_includes(self, *fields):
+        self.includes = fields
+
 class QuerySet(object):
     def __init__(self, model, key=None, query=None):
         self.model = model
@@ -467,6 +537,7 @@ class QuerySet(object):
         self.query = query or Query(model, base_key=self.base_key)
         self._cache = None
         self._iter = None
+        self._includes = []
 
     def filter(self, **kwargs):
         return self._filter_or_exclude(False, **kwargs)
@@ -519,9 +590,40 @@ class QuerySet(object):
         c.query.add_sorting(field, desc)
         return c
 
+    def include(self, *fields):
+        fieldkeys = []
+        models = []
+
+        for field in fields:
+            if field not in self.model._fks:
+                raise FieldError('%s is not a ForeignField' % field)
+
+            model = self.model._fields[field].rel_model
+            fieldkeys.append((field, model._keys['obj']))
+            models.append((field, model))
+
+        c = self._clone()
+        c._includes = models
+        c.query.add_includes(*fieldkeys)
+        return c
+
     def iterator(self):
+        i = 0
+
         for data in self.query.result_iter():
-            yield self.model().from_dict(data, to_python=True)
+            if i == 0:
+                d = self.model().from_dict(data, to_python=True)
+            elif data:
+                # data might be an empty dict — at which point we dont want
+                # to do anything with it.
+                field, model = self._includes[i - 1]
+                setattr(d, field, model().from_dict(data, to_python=True))
+
+            if i != len(self._includes):
+                i = i + 1
+            else:
+                i = 0
+                yield d
 
     def count(self):
         return len(self._clone())
@@ -567,7 +669,9 @@ class QuerySet(object):
         self.query = self.query._clone()
 
     def _clone(self, *args, **kwargs):
-        return self.__class__(self.model, key=self.base_key, query=self.query._clone())
+        c = self.__class__(self.model, key=self.base_key, query=self.query._clone())
+        c._includes = self._includes[:]
+        return c
 
     def _cache_iter(self):
         pos = 0
@@ -664,6 +768,24 @@ class IntegerField(ZField):
 
     def to_db(self, value):
         return safe_bytestr(value)
+
+class ForeignField(IntegerField):
+    def __init__(self, rel_model, **kwargs):
+        super(ForeignField, self).__init__(**kwargs)
+        self.rel_model = rel_model
+
+    def __set__(self, instance, value):
+        if isinstance(value, self.rel_model):
+            setattr(instance, '_' + self.name + '_obj', value)
+            value = value.pk
+
+        return super(ForeignField, self).__set__(instance, value)
+
+    def to_python(self, value):
+        if isinstance(value, self.rel_model):
+            return value
+
+        return super(ForeignField, self).to_python(value)
 
 class DateTimeField(ZField):
     def __init__(self, auto_now_add=False, **kwargs):
@@ -782,6 +904,7 @@ class BaseModel(type):
         attrs['pk'] = IntegerField(nil=True, zindex=True, index=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
+        cls._fks = []
         cls._indices = []
         cls._zindices = []
         cls._db = r
@@ -815,6 +938,9 @@ class BaseModel(type):
                     cls._zindices.append(k)
             elif isinstance(v, CollectionField):
                 v.name = k
+
+            if isinstance(v, ForeignField):
+                cls._fks.append(k)
 
         cls.obj = QuerySet(cls)
         return cls

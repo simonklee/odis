@@ -7,7 +7,7 @@ import os
 
 from odis.utils import s
 from odis import (Model, r, Set, IntegerField, QueryKey, EmptyError, FieldError,
-    Field, DateTimeField, SetField, SortedSetField, RelField, SortedSet)
+    Field, DateTimeField, SetField, SortedSetField, RelField, SortedSet, ForeignField)
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -29,6 +29,9 @@ class Qux(Model):
     sortedsets = SortedSetField(Baz)
     sortedsets_str = SortedSetField(callback=str)
     rel = RelField(Baz)
+
+class Foobar(Model):
+    baz = ForeignField(Baz)
 
 class ModelsTestCase(unittest.TestCase):
     def test_dbkeys(self):
@@ -140,6 +143,15 @@ class FieldTestCase(unittest.TestCase):
         self.users.pop().delete()
         count = count - 1
         self.assertEquals(len(q.rel), count)
+
+    def test_foreignfield(self):
+        Baz._db.flushdb()
+        baz = Baz(username='foo')
+        baz.save()
+        foobar = Foobar(baz=baz)
+        foobar.save()
+        qs = foobar.obj.include('baz')
+        foobar = list(qs)[0]
 
     def test_sets_with_type(self):
         q = Qux()
