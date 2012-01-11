@@ -9,7 +9,7 @@ import itertools
 import functools
 
 from . import config
-from .utils import safe_bytestr, safe_unicode, s
+from .utils import safe_bytestr, safe_unicode
 
 try:
     import odisconfig
@@ -23,7 +23,6 @@ try:
 except ImportError:
     pass
 
-
 EMPTY_VALUES = (None, '', [], (), {})
 CHUNK_SIZE = 50
 
@@ -35,7 +34,7 @@ class Redis(redis.StrictRedis):
         }
     )
 
-    hgetallref_lua = '''
+    hgetallrel_lua = '''
         local keys, argv = KEYS, ARGV
         local obj_key = table.remove(keys, 1)
         local pks = argv
@@ -77,13 +76,13 @@ class Redis(redis.StrictRedis):
         return r
         '''
 
-    def hgetallrel(self, name, pks, extra=None):
-        if not extra:
-            extra = []
+    def hgetallrel(self, name, pks, fieldkeys=None):
+        if fieldkeys:
+            extra = list(itertools.chain.from_iterable(fieldkeys))
         else:
-            extra = list(itertools.chain.from_iterable(extra))
+            extra = []
 
-        return self.execute_command('EVAL', self.hgetallref_lua, len(extra) + 1, name, *extra + pks)
+        return self.execute_command('EVAL', self.hgetallrel_lua, len(extra) + 1, name, *extra + pks)
 
 r = Redis(**config.REDIS_DATABASE)
 
@@ -486,7 +485,6 @@ class Query(object):
 
         return p.execute()
 
-
     def fetch_values(self):
         self.execute_query()
         self.pos = max(self.off, self.pos)
@@ -527,8 +525,8 @@ class Query(object):
         self.sort_by = field
         self.desc = desc
 
-    def add_includes(self, *fields):
-        self.includes = fields
+    def add_includes(self, *fieldkeys):
+        self.includes = fieldkeys
 
 class QuerySet(object):
     def __init__(self, model, key=None, query=None):
@@ -1037,6 +1035,7 @@ class Model(object):
 
         # add all indexed keys to their index
         indices_key = self.key_for('indices', pk=self.pk)
+
         for k in self._indices:
             key = self.key_for('index', field=k, value=data[k])
             p.sadd(key, self.pk)
