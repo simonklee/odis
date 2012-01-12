@@ -695,6 +695,12 @@ class QuerySet(object):
             self._iter = None
 
 class Field(object):
+    msg = {
+        'type': 'invalid type "%s"',
+        'nil': 'unexpected nil value',
+        'unique': '`%s` not unique',
+    }
+
     def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
         '''
         `index`:   Key for value maps to `pk`. lookup by value possible.
@@ -720,18 +726,22 @@ class Field(object):
 
         return None
 
+    def clean(self, instance, value):
+        if not self.is_empty(value):
+            value = self.to_python(value)
+
+        self.validate(instance, value)
+        return value
+
     def validate(self, instance, value):
         if self.nil and self.is_empty(value):
             return
-        elif self.is_empty(value):
-            raise ValidationError('`%s` unexpected nil value' % self.name)
-        try:
-            setattr(instance, self.name, self.to_python(value))
-        except TypeError, e:
-            raise ValidationError('`%s` invalid type "%s"' % (self.name, e.message))
+
+        if self.is_empty(value):
+            raise ValidationError(self.msg['nil'])
 
         if self.unique and not self.is_unique(instance, value):
-            raise ValidationError('%s `%s` not unique' % (self.name, value))
+            raise ValidationError(self.msg['unique'] % value)
 
     def is_empty(self, value):
         return value in EMPTY_VALUES
@@ -743,6 +753,7 @@ class Field(object):
                 or instance._db.scard(key) == 0)
 
     def to_python(self, value):
+        'to_python should recieve a non-empty value'
         return value
 
     def to_db(self, value):
@@ -750,7 +761,10 @@ class Field(object):
 
 class CharField(Field):
     def to_python(self, value):
-        return safe_unicode(value)
+        try:
+            return safe_unicode(value)
+        except UnicodeEncodeError, e:
+            raise ValidationError(self.msg['type'] % e.message)
 
     def to_db(self, value):
         return safe_bytestr(value)
@@ -762,7 +776,10 @@ class ZField(Field):
 
 class IntegerField(ZField):
     def to_python(self, value):
-        return int(value)
+        try:
+            return int(value)
+        except (TypeError, ValueError), e:
+            raise ValidationError(self.msg['type'] % e.message)
 
     def to_db(self, value):
         return safe_bytestr(value)
@@ -790,28 +807,51 @@ class DateTimeField(ZField):
         super(DateTimeField, self).__init__(**kwargs)
         self.auto_now_add = auto_now_add
 
-    def validate(self, instance, value):
+    def __get__(self, instance, owner):
+        value = super(DateTimeField, self).__get__(instance, owner)
+
         if self.is_empty(value) and self.auto_now_add:
             value = datetime.datetime.now()
-            setattr(instance, self.name, value)
-
-        super(DateTimeField, self).validate(instance, value)
-
-    def to_python(self, value):
-        if not isinstance(value, datetime.datetime):
-            return datetime.datetime.fromtimestamp(float(value))
 
         return value
+
+    def to_python(self, value):
+        if isinstance(value, datetime.date):
+            return datetime.datetime(value.year, value.month, value.day)
+        elif isinstance(value, datetime.datetime):
+            # make sure we always use the same precision 1 == 100000
+            value.replace(microsecond=int(str(value.microsecond).ljust(6, '0')))
+            return value
+        try:
+            return datetime.datetime.fromtimestamp(float(value))
+        except TypeError, e:
+            raise ValidationError(self.msg['type'] % e.message)
 
     def to_db(self, value):
-        return u'%d.%s' % (time.mktime(value.timetuple()), str(value.microsecond).ljust(6, '0'))
+        return u'%d.%d' % (time.mktime(value.timetuple()), value.microsecond)
 
 class DateField(ZField):
-    def to_python(self, value):
-        if not isinstance(value, datetime.date):
-            return datetime.date.fromtimestamp(float(value))
+    def __init__(self, auto_now_add=False, **kwargs):
+        super(DateField, self).__init__(**kwargs)
+        self.auto_now_add = auto_now_add
+
+    def __get__(self, instance, owner):
+        value = super(DateField, self).__get__(instance, owner)
+
+        if self.is_empty(value) and self.auto_now_add:
+            value = datetime.datetime.today()
 
         return value
+
+    def to_python(self, value):
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        elif isinstance(value, datetime.date):
+            return value
+        try:
+            return datetime.date.fromtimestamp(float(value))
+        except TypeError, e:
+            raise ValidationError(self.msg['type'] % e.message)
 
     def to_db(self, value):
         return u'%f' % time.mktime(value.timetuple())
@@ -973,8 +1013,12 @@ class Model(object):
         self._errors = {}
 
         for name, field in self._fields.items():
+            v = getattr(self, name)
+
+            if field.nil and field.is_empty(v):
+                continue
             try:
-                field.validate(self, getattr(self, name))
+                setattr(self, name, field.clean(self, v))
             except ValidationError, e:
                 self._errors[name] = e.message
 
@@ -1094,7 +1138,17 @@ class Model(object):
         return self
 
     def as_dict(self, to_db=False):
-        if to_db:
-            return dict((k, f.to_db(getattr(self, k))) for k, f in self._fields.items())
+        data = {}
 
-        return dict((k, getattr(self, k)) for k in self._fields)
+        for k, f in self._fields.items():
+            v = getattr(self, k)
+
+            if to_db:
+                if f.nil and f.is_empty(v):
+                    continue
+
+                data[k] = f.to_db(v)
+            else:
+                data[k] = v
+
+        return data

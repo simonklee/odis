@@ -23,8 +23,17 @@ for u in range(10):
 for i in range(1000):
     Bar(foob=random.randint(1, 10), fooc=random.randint(1, 10)).save()
 
+s()
+
+obj = Bar()
+obj.is_valid()
+obj = Bar(foob=random.randint(1, 10), fooc=random.randint(1, 10))
+obj.save()
+print obj.as_dict()
+print obj.as_dict(to_db=True)
 total = time.time()
 qs = Bar.obj.include('foo')
 #qs = Bar.obj
-print list(qs[:2])
+obj = qs[0]
 print 'total %.3fms' % (time.time() - total)
+s()

@@ -81,12 +81,12 @@ class ModelsTestCase(unittest.TestCase):
 
     def test_pack(self):
         f = Foo()
-        data = {'username': 'foo', 'created_at': 1}
+        data = {'username': 'foo', 'created_at': datetime.datetime.now()}
         f.from_dict(data)
-        data['pk'] = None
         data['active'] = 1
-        got = f.as_dict()
-        self.assertEqual(got, data)
+        self.assertEqual('pk' in f.as_dict(to_db=True), False)
+        data['pk'] = None
+        self.assertEqual(f.as_dict(), data)
 
 class FieldTestCase(unittest.TestCase):
     def setUp(self):
@@ -98,14 +98,13 @@ class FieldTestCase(unittest.TestCase):
             b.save()
             self.users.append(b)
 
-    @unittest.skip('known datetime bug')
     def test_datetimefield(self):
         b1 = Bar(
             username='foo',
-            created_at=datetime.datetime.fromtimestamp(1325161824.91981))
+            created_at=datetime.datetime.fromtimestamp(1325161824.1))
         b2 = Bar(
             username='bar',
-            created_at=datetime.datetime(2011, 12, 29, 13, 30, 24, 91981))
+            created_at=datetime.datetime(2011, 12, 29, 13, 30, 24, 10))
 
         b2.save()
         b1.save()
