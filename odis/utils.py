@@ -1,6 +1,9 @@
 import sys
 
-from IPython.core.debugger import Pdb, BdbQuit_excepthook
+try:
+    from IPython.core.debugger import Pdb, BdbQuit_excepthook
+except ImportError:
+    pass
 
 def s():
     BdbQuit_excepthook.excepthook_ori = sys.excepthook

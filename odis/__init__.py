@@ -537,6 +537,9 @@ class QuerySet(object):
         self._iter = None
         self._includes = []
 
+    def all(self):
+        return self.filter()
+
     def filter(self, **kwargs):
         return self._filter_or_exclude(False, **kwargs)
 
