@@ -8,7 +8,7 @@ setup(
     name='odis',
     version='0.0.2',
     description='simple models for redis',
-    long_description=codecs.open('README', "r", "utf-8").read(),
+    long_description=codecs.open('readme.md', "r", "utf-8").read(),
     author='Simon Klee',
     author_email='simon@simonklee.org',
     url='http://github.com/simonz05/odis',
