@@ -387,7 +387,7 @@ class TypeTestCase(unittest.TestCase):
 
         ss2 = SortedSet('created_at')
 
-        for obj in list(Bar.obj):
+        for obj in list(Bar.obj.all()):
             data = obj.as_dict(to_db=True)
             ss2.add(float(data['created_at']), data['pk'])
 
