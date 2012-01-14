@@ -7,7 +7,7 @@ from setuptools import setup, find_packages
 setup(
     name='odis',
     version='0.0.3',
-    description='objects Redis in for Python',
+    description='objects in Redis for Python',
     long_description=codecs.open('readme.md', "r", "utf-8").read(),
     author='Simon Klee',
     author_email='simon@simonklee.org',
