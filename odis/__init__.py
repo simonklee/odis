@@ -707,8 +707,13 @@ class Field(object):
         'choice': '`%s` invalid choice',
     }
 
-    def __init__(self, verbose_name=None, index=False, unique=False,
-            choices=None, nil=False, default=EMPTY):
+    def __init__(self,
+            verbose_name=None,
+            index=False,
+            unique=False,
+            choices=None,
+            nil=False,
+            default=EMPTY):
         '''
         `index`:   Key for value maps to `pk`. lookup by value possible.
         `unique`:  Only one model with a given value.
