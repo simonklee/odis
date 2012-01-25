@@ -707,12 +707,14 @@ class Field(object):
         'choice': '`%s` invalid choice',
     }
 
-    def __init__(self, index=False, unique=False, choices=None, nil=False, default=EMPTY):
+    def __init__(self, verbose_name=None, index=False, unique=False,
+            choices=None, nil=False, default=EMPTY):
         '''
         `index`:   Key for value maps to `pk`. lookup by value possible.
         `unique`:  Only one model with a given value.
         `nil`:     Allow nil value.
         `default`: Set to default value if otherwise empty. '''
+        self.verbose_name = verbose_name
         self.unique = unique
         self.index = index or unique
         self.nil = nil
@@ -887,7 +889,8 @@ class CollectionField(object):
         return field
 
 class BaseSetField(CollectionField):
-    def __init__(self, rel_model=None, callback=None, *args, **kwargs):
+    def __init__(self, verbose_name=None, rel_model=None, callback=None, *args, **kwargs):
+        self.verbose_name = verbose_name
         self.rel_model = rel_model
         self.callback = callback
 

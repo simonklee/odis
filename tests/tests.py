@@ -25,9 +25,9 @@ class Baz(Model):
     username = Field(unique=True)
 
 class Qux(Model):
-    sets = SetField(Baz)
+    sets = SetField(rel_model=Baz)
     sets_float = SetField(callback=float)
-    sortedsets = SortedSetField(Baz)
+    sortedsets = SortedSetField(rel_model=Baz)
     sortedsets_str = SortedSetField(callback=str)
     rel = RelField(Baz)
 
