@@ -9,7 +9,7 @@ import itertools
 import functools
 
 from . import config
-from .utils import safe_bytestr, safe_unicode
+from .utils import safe_bytestr, safe_unicode, timeit
 
 try:
     import odisconfig
@@ -269,6 +269,7 @@ class SortedSet(Collection):
     def diff(self, target, keys):
         return self._associative_op(self.db.zdiffstore, target, keys)
 
+    #@timeit
     def sort(self, by, **opts):
         if len(by) == 0:
             by = (self.key, )
@@ -472,6 +473,7 @@ class Query(object):
         self.res.sort({diffed.key:0, self.sort_by:1})
         self.res.expireat(timestamp)
 
+    #@timeit
     def new_chunk(self, start, stop):
         if len(self.includes) > 0:
             # do query using lua scripts to retrieve extra objects
@@ -564,7 +566,7 @@ class QuerySet(object):
 
             pk = r.srandmember(self.model.key_for('index', field=key, value=value))
 
-        if not r.sismember(self.base_key, pk):
+        if not pk or not r.sismember(self.base_key, pk):
             raise EmptyError('`%s(%s=%s)` returned an empty result' %
                     (self.model.__name__, key, pk or value))
 
@@ -702,9 +704,10 @@ class Field(object):
         'type': 'invalid type "%s"',
         'nil': 'unexpected nil value',
         'unique': '`%s` not unique',
+        'choice': '`%s` invalid choice',
     }
 
-    def __init__(self, index=False, unique=False, nil=False, default=EMPTY):
+    def __init__(self, index=False, unique=False, choices=None, nil=False, default=EMPTY):
         '''
         `index`:   Key for value maps to `pk`. lookup by value possible.
         `unique`:  Only one model with a given value.
@@ -714,6 +717,7 @@ class Field(object):
         self.index = index or unique
         self.nil = nil
         self.default = default
+        self.choices = choices or []
 
     def __set__(self, instance, value):
         return setattr(instance, '_' + self.name, value)
@@ -745,6 +749,13 @@ class Field(object):
 
         if self.unique and not self.is_unique(instance, value):
             raise ValidationError(self.msg['unique'] % value)
+
+        if self.choices:
+            for v, name in self.choices:
+                if v == value:
+                    return
+
+            raise ValidationError(self.msg['choice'] % value)
 
     def is_empty(self, value):
         return value in EMPTY_VALUES
@@ -806,14 +817,14 @@ class ForeignField(IntegerField):
         return super(ForeignField, self).to_python(value)
 
 class DateTimeField(ZField):
-    def __init__(self, auto_now_add=False, **kwargs):
+    def __init__(self, now=False, **kwargs):
         super(DateTimeField, self).__init__(**kwargs)
-        self.auto_now_add = auto_now_add
+        self.now = now
 
     def __get__(self, instance, owner):
         value = super(DateTimeField, self).__get__(instance, owner)
 
-        if self.is_empty(value) and self.auto_now_add:
+        if self.is_empty(value) and self.now:
             value = datetime.datetime.now()
 
         return value
@@ -834,14 +845,14 @@ class DateTimeField(ZField):
         return u'%d.%d' % (time.mktime(value.timetuple()), value.microsecond)
 
 class DateField(ZField):
-    def __init__(self, auto_now_add=False, **kwargs):
+    def __init__(self, now=False, **kwargs):
         super(DateField, self).__init__(**kwargs)
-        self.auto_now_add = auto_now_add
+        self.now = now
 
     def __get__(self, instance, owner):
         value = super(DateField, self).__get__(instance, owner)
 
-        if self.is_empty(value) and self.auto_now_add:
+        if self.is_empty(value) and self.now:
             value = datetime.datetime.today()
 
         return value
@@ -983,7 +994,10 @@ class BaseModel(type):
             if isinstance(v, ForeignField):
                 cls._fks.append(k)
 
-        cls.obj = QuerySet(cls)
+        if 'obj' in attrs:
+            cls.obj = attrs['obj'](cls)
+        else:
+            cls.obj = QuerySet(cls)
         return cls
 
 class Model(object):

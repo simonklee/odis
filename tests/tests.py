@@ -7,7 +7,8 @@ import os
 
 from odis.utils import s
 from odis import (Model, r, Set, IntegerField, QueryKey, EmptyError, FieldError,
-    Field, DateTimeField, SetField, SortedSetField, RelField, SortedSet, ForeignField)
+    Field, DateTimeField, SetField, SortedSetField, RelField, SortedSet, ForeignField,
+    CharField)
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'odisconfig.py'))
 
@@ -18,7 +19,7 @@ class Foo(Model):
 
 class Bar(Model):
     username = Field(index=True, unique=True)
-    created_at = DateTimeField(auto_now_add=True, zindex=True)
+    created_at = DateTimeField(now=True, zindex=True)
 
 class Baz(Model):
     username = Field(unique=True)
@@ -32,6 +33,10 @@ class Qux(Model):
 
 class Foobar(Model):
     baz = ForeignField(Baz)
+
+class FooBaz(Model):
+    foochr = CharField(choices=[(u'1', 'foo'), (u'2', 'bar')])
+    fooint = IntegerField(choices=[(1, 'foo'), (2, 'bar')])
 
 class ModelsTestCase(unittest.TestCase):
     def test_dbkeys(self):
@@ -108,8 +113,15 @@ class FieldTestCase(unittest.TestCase):
 
         b2.save()
         b1.save()
-        self.assertEquals(b1.created_at, b2.created_at)
-        self.assertEquals(Bar.obj.get(pk=b1.pk).created_at, Bar.obj.get(pk=b2.pk).created_at)
+        self.assertEqual(b1.created_at, b2.created_at)
+        self.assertEqual(Bar.obj.get(pk=b1.pk).created_at, Bar.obj.get(pk=b2.pk).created_at)
+
+    def test_choices(self):
+        o = FooBaz()
+        self.assertEqual(o.save(), False)
+        o.foochr = 1
+        o.fooint = 1
+        self.assertEqual(o.save(), True)
 
     def test_setfield(self):
         q = Qux()
