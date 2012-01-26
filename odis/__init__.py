@@ -891,10 +891,10 @@ class CollectionField(object):
         return getattr(instance, attr)
 
 class BaseSetField(CollectionField):
-    def __init__(self, verbose_name=None, model=None, callback=None, *args, **kwargs):
+    def __init__(self, verbose_name=None, model=None, coerce=None, *args, **kwargs):
         self.verbose_name = verbose_name
         self.model = model
-        self.callback = callback
+        self.coerce = coerce
 
     def __get__(self, instance, owner):
         field = super(BaseSetField, self).__get__(instance, owner)
@@ -902,8 +902,8 @@ class BaseSetField(CollectionField):
 
         if self.model:
             return self.datastructure(key, model=self.model, map_res=True)
-        elif self.callback:
-            return self.datastructure(key, map_res=True, callback=self.callback)
+        elif self.coerce:
+            return self.datastructure(key, map_res=True, callback=self.coerce)
 
         return self.datastructure(key)
 
@@ -961,6 +961,7 @@ class BaseModel(type):
         attrs['pk'] = IntegerField(nil=True, zindex=True, index=True)
         cls = super(BaseModel, meta).__new__(meta, name, bases, attrs)
         cls._fields = {}
+        cls._coll_fields = {}
         cls._fks = []
         cls._indices = []
         cls._zindices = []
@@ -994,6 +995,7 @@ class BaseModel(type):
                 if getattr(v, 'zindex', False):
                     cls._zindices.append(k)
             elif isinstance(v, CollectionField):
+                cls._coll_fields[k] = v
                 v.name = k
 
             if isinstance(v, ForeignField):

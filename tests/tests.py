@@ -26,9 +26,9 @@ class Baz(Model):
 
 class Qux(Model):
     sets = SetField(model=Baz)
-    sets_float = SetField(callback=float)
+    sets_float = SetField(coerce=float)
     sortedsets = SortedSetField(model=Baz)
-    sortedsets_str = SortedSetField(callback=str)
+    sortedsets_str = SortedSetField(coerce=str)
     rel = RelField(Baz)
 
 class Foobar(Model):
