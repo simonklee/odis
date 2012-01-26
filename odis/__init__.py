@@ -908,17 +908,17 @@ class BaseSetField(CollectionField):
         return self.datastructure(key)
 
 class SetField(BaseSetField):
-    'set of values which can be pks and map to a different model or map to a type'
+    'set of values which can be pks and map to a model or type'
     datastructure = Set
     key_type = 'set'
 
 class SortedSetField(BaseSetField):
-    'sorted set of values which can be pks and map to a different model'
+    'sorted set of values which can be pks and map to a model or type'
     datastructure = SortedSet
     key_type = 'sortedset'
 
 class RelField(CollectionField):
-    'sorted set of pks which maps to a different model and exposes the a QuerySet'
+    'sorted set of pks which map to a different model and expose a RelQuerySet'
     key_type='rel'
 
     def __init__(self, model, *args, **kwargs):
