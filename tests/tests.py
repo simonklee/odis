@@ -25,9 +25,9 @@ class Baz(Model):
     username = Field(unique=True)
 
 class Qux(Model):
-    sets = SetField(rel_model=Baz)
+    sets = SetField(model=Baz)
     sets_float = SetField(callback=float)
-    sortedsets = SortedSetField(rel_model=Baz)
+    sortedsets = SortedSetField(model=Baz)
     sortedsets_str = SortedSetField(callback=str)
     rel = RelField(Baz)
 
@@ -128,6 +128,8 @@ class FieldTestCase(unittest.TestCase):
         q.save()
         q.sets.sadd(*[u.pk for u in self.users[:2]])
         self.assertEqual(list(q.sets), self.users[:2])
+        q2 = Qux.obj.get(pk=q.pk)
+        self.assertEqual(list(q2.sets), self.users[:2])
 
     def test_sortedsetfield(self):
         q = Qux()

@@ -601,7 +601,7 @@ class QuerySet(object):
             if field not in self.model._fks:
                 raise FieldError('%s is not a ForeignField' % field)
 
-            model = self.model._fields[field].rel_model
+            model = self.model._fields[field].model
             fieldkeys.append((field, model._keys['obj']))
             models.append((field, model))
 
@@ -806,19 +806,19 @@ class IntegerField(ZField):
         return safe_bytestr(value)
 
 class ForeignField(IntegerField):
-    def __init__(self, rel_model, **kwargs):
+    def __init__(self, model, **kwargs):
         super(ForeignField, self).__init__(**kwargs)
-        self.rel_model = rel_model
+        self.model = model
 
     def __set__(self, instance, value):
-        if isinstance(value, self.rel_model):
+        if isinstance(value, self.model):
             setattr(instance, '_' + self.name + '_obj', value)
             value = value.pk
 
         return super(ForeignField, self).__set__(instance, value)
 
     def to_python(self, value):
-        if isinstance(value, self.rel_model):
+        if isinstance(value, self.model):
             return value
 
         return super(ForeignField, self).to_python(value)
@@ -885,26 +885,23 @@ class CollectionField(object):
         assert instance, 'can only be called on instance obj'
         attr = '_' + self.name
 
-        if hasattr(instance, attr):
-            field = getattr(instance, attr)
-        else:
+        if not hasattr(instance, attr):
             setattr(instance, attr, self.name)
-            field = self.name
 
-        return field
+        return getattr(instance, attr)
 
 class BaseSetField(CollectionField):
-    def __init__(self, verbose_name=None, rel_model=None, callback=None, *args, **kwargs):
+    def __init__(self, verbose_name=None, model=None, callback=None, *args, **kwargs):
         self.verbose_name = verbose_name
-        self.rel_model = rel_model
+        self.model = model
         self.callback = callback
 
     def __get__(self, instance, owner):
         field = super(BaseSetField, self).__get__(instance, owner)
         key = instance.key_for(self.key_type, pk=instance.pk, field=field)
 
-        if self.rel_model:
-            return self.datastructure(key, model=self.rel_model, map_res=True)
+        if self.model:
+            return self.datastructure(key, model=self.model, map_res=True)
         elif self.callback:
             return self.datastructure(key, map_res=True, callback=self.callback)
 
@@ -924,24 +921,24 @@ class RelField(CollectionField):
     'sorted set of pks which maps to a different model and exposes the a QuerySet'
     key_type='rel'
 
-    def __init__(self, rel_model, *args, **kwargs):
-        self.rel_model = rel_model
+    def __init__(self, model, *args, **kwargs):
+        self.model = model
 
     def __get__(self, instance, owner):
         field = super(RelField, self).__get__(instance, owner)
-        rel_model = self.rel_model
+        model = self.model
         key = instance.key_for(
             self.key_type,
             pk=instance.pk,
             field=field,
-            other=rel_model.key_for('all'))
+            other=model.key_for('all'))
         ds = Set(key)
 
         class RelQuerySet(QuerySet):
             def add(self, *objs):
                 'one or more `(score, obj)`'
                 for obj in objs:
-                    if not isinstance(obj, rel_model):
+                    if not isinstance(obj, model):
                         raise TypeError('invalid model')
 
                     ds.add(obj.pk)
@@ -949,7 +946,7 @@ class RelField(CollectionField):
 
             def delete(self, *objs):
                 for obj in objs:
-                    if not isinstance(obj, rel_model):
+                    if not isinstance(obj, model):
                         raise TypeError('invalid model')
 
                     ds.delete(obj.pk)
@@ -957,7 +954,7 @@ class RelField(CollectionField):
 
                 self._flush_local_cache()
 
-        return RelQuerySet(rel_model, key=key)
+        return RelQuerySet(model, key=key)
 
 class BaseModel(type):
     def __new__(meta, name, bases, attrs):
