@@ -6,9 +6,9 @@ try:
 except ImportError:
     pass
 
-def s():
+def s(color='NoColor'):
     BdbQuit_excepthook.excepthook_ori = sys.excepthook
-    Pdb('LightBG').set_trace(sys._getframe().f_back)
+    Pdb(color).set_trace(sys._getframe().f_back)
 
 def timeit(method):
     def wrapper(*args, **kw):

@@ -126,7 +126,7 @@ class FieldTestCase(unittest.TestCase):
     def test_setfield(self):
         q = Qux()
         q.save()
-        q.sets.sadd(*[u.pk for u in self.users[:2]])
+        q.sets.add(*[u.pk for u in self.users[:2]])
         self.assertEqual(list(q.sets), self.users[:2])
         q2 = Qux.obj.get(pk=q.pk)
         self.assertEqual(list(q2.sets), self.users[:2])
@@ -134,8 +134,8 @@ class FieldTestCase(unittest.TestCase):
     def test_sortedsetfield(self):
         q = Qux()
         q.save()
-        q.sortedsets.zadd(1.0, self.users[0].pk)
-        q.sortedsets.zadd(0.2, self.users[1].pk)
+        q.sortedsets.add(1.0, self.users[0].pk)
+        q.sortedsets.add(0.2, self.users[1].pk)
         self.assertEqual(list(q.sortedsets), [self.users[1], self.users[0]])
 
     def test_relfield(self):
@@ -170,7 +170,7 @@ class FieldTestCase(unittest.TestCase):
         q = Qux()
         q.save()
         values = [i * 1.0 for i in range(10)]
-        q.sets_float.sadd(*values)
+        q.sets_float.add(*values)
         res = set(q.sets_float)
 
         for v in values:

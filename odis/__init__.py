@@ -164,6 +164,16 @@ class Set(Collection):
     def add(self, *members):
         return self.db.sadd(self.key, *members)
 
+    def replace(self, *members):
+        'replace all members in a set with new members'
+        p = self.db.pipeline(transaction=True)
+        p.delete(self.key)
+        p.sadd(self.key, *members)
+        p.execute()
+
+    def all(self):
+        return iter(self)
+
     def delete(self, *members):
         return self.db.srem(self.key, *members)
 
@@ -259,6 +269,9 @@ class SortedSet(Collection):
 
     def add(self, score, member):
         self.db.zadd(self.key, score, member)
+
+    def all(self):
+        return iter(self)
 
     def delete(self, *members):
         return self.db.zrem(self.key, *members)
@@ -715,10 +728,11 @@ class Field(object):
             nil=False,
             default=EMPTY):
         '''
-        `index`:   Key for value maps to `pk`. lookup by value possible.
-        `unique`:  Only one model with a given value.
-        `nil`:     Allow nil value.
-        `default`: Set to default value if otherwise empty. '''
+        `verbose_name`:  A verbose name for the field.
+        `index`:         Key for value maps to `pk`. lookup by value possible.
+        `unique`:        Only one model with a given value.
+        `nil`:           Allow nil value.
+        `default`:       Set to default value if otherwise empty. '''
         self.verbose_name = verbose_name
         self.unique = unique
         self.index = index or unique
@@ -1032,6 +1046,10 @@ class Model(object):
     @property
     def key(self):
         return self.key_for('obj', pk=self.pk)
+
+    @property
+    def errors(self):
+        return getattr(self, '_errors', {})
 
     def is_valid(self):
         self._errors = {}
