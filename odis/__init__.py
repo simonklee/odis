@@ -892,6 +892,11 @@ class DateField(ZField):
         return u'%f' % time.mktime(value.timetuple())
 
 class CollectionField(object):
+    def __init__(self, verbose_name=None, model=None, coerce=None):
+        self.verbose_name = verbose_name
+        self.model = model
+        self.coerce = coerce
+
     def __set__(self, instance, value):
         return setattr(instance, '_' + self.name, value)
 
@@ -905,11 +910,6 @@ class CollectionField(object):
         return getattr(instance, attr)
 
 class BaseSetField(CollectionField):
-    def __init__(self, verbose_name=None, model=None, coerce=None, *args, **kwargs):
-        self.verbose_name = verbose_name
-        self.model = model
-        self.coerce = coerce
-
     def __get__(self, instance, owner):
         field = super(BaseSetField, self).__get__(instance, owner)
         key = instance.key_for(self.key_type, pk=instance.pk, field=field)
@@ -936,7 +936,7 @@ class RelField(CollectionField):
     key_type='rel'
 
     def __init__(self, model, *args, **kwargs):
-        self.model = model
+        super(RelField, self).__init__(model=model, **kwargs)
 
     def __get__(self, instance, owner):
         field = super(RelField, self).__get__(instance, owner)
