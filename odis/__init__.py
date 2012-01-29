@@ -956,7 +956,7 @@ class RelField(CollectionField):
                         raise TypeError('invalid model')
 
                     ds.add(obj.pk)
-                    obj.save()
+                    obj.flush_query_cache()
 
             def delete(self, *objs):
                 for obj in objs:
@@ -964,9 +964,14 @@ class RelField(CollectionField):
                         raise TypeError('invalid model')
 
                     ds.delete(obj.pk)
-                    obj.save()
+                    obj.flush_query_cache()
 
                 self._flush_local_cache()
+
+            def replace(self, *objs):
+                'replace all members in a set with new members'
+                self.delete(*self.all())
+                self.add(*objs)
 
         return RelQuerySet(model, key=key)
 

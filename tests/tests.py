@@ -149,13 +149,23 @@ class FieldTestCase(unittest.TestCase):
         self.assertEqual(len(q.rel), count)
 
         # test filters with different base key
-        self.assertEquals(q.rel[0], self.users[1])
-        self.assertEquals(q.rel.filter(username='bar')[0], self.users[1])
+        self.assertEqual(q.rel[0], self.users[1])
+        self.assertEqual(q.rel.filter(username='bar')[0], self.users[1])
         self.assertRaises(EmptyError, q.rel.get, username='foo')
 
         self.users.pop().delete()
         count = count - 1
-        self.assertEquals(len(q.rel), count)
+        self.assertEqual(len(q.rel), count)
+
+        # test that we properly flush query cache for Qux when add() and delete()
+        q.rel.add(*self.users)
+        self.assertEqual(len(q.rel.all()), len(self.users))
+
+        q.rel.delete(*self.users)
+        self.assertEqual(len(q.rel.all()), 0)
+
+        q.rel.replace(*self.users)
+        self.assertEqual(len(q.rel.all()), len(self.users))
 
     def test_foreignfield(self):
         Baz._db.flushdb()
