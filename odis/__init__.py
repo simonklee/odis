@@ -9,7 +9,7 @@ import itertools
 import functools
 
 from . import config
-from .utils import safe_bytestr, safe_unicode, timeit
+from .utils import safe_bytestr, safe_unicode, s
 
 try:
     import odisconfig
@@ -851,12 +851,12 @@ class DateTimeField(ZField):
         return value
 
     def to_python(self, value):
-        if isinstance(value, datetime.date):
-            return datetime.datetime(value.year, value.month, value.day)
-        elif isinstance(value, datetime.datetime):
+        if isinstance(value, datetime.datetime):
             # make sure we always use the same precision 1 == 100000
             value.replace(microsecond=int(str(value.microsecond).ljust(6, '0')))
             return value
+        elif isinstance(value, datetime.date):
+            return datetime.datetime(value.year, value.month, value.day)
         try:
             return datetime.datetime.fromtimestamp(float(value))
         except TypeError, e:
@@ -971,6 +971,7 @@ class RelField(CollectionField):
             def replace(self, *objs):
                 'replace all members in a set with new members'
                 self.delete(*self.all())
+                self.model._db.delete(key)
                 self.add(*objs)
 
         return RelQuerySet(model, key=key)
@@ -1097,18 +1098,21 @@ class Model(object):
 
     def delete(self, write=True, pipe=None, clean_cache=True):
         p = pipe or self._db.pipeline()
-        # first we delete prior data
+        # first we delete hash
         p.delete(self.key)
         # rm from index for model
         p.srem(self.key_for('all'), self.pk)
         # make sure we delete indices not more in use.
         pattern = re.compile(r'%s_zindex\:' % self._namespace)
+        indices_key = self.key_for('indices', pk=self.pk)
 
-        for k in self._db.smembers(self.key_for('indices', pk=self.pk)):
+        for k in self._db.smembers(indices_key):
             if pattern.search(k):
                 p.zrem(k, self.pk)
             else:
                 p.srem(k, self.pk)
+
+        p.delete(indices_key)
 
         if clean_cache:
             self.flush_query_cache(pk=self.pk)
