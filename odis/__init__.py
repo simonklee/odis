@@ -1057,10 +1057,13 @@ class Model(object):
     def errors(self):
         return getattr(self, '_errors', {})
 
-    def is_valid(self):
+    def is_valid(self, fields=None):
         self._errors = {}
 
         for name, field in self._fields.items():
+            if fields and not name in fields:
+                continue
+
             v = getattr(self, name)
 
             if field.nil and field.is_empty(v):
