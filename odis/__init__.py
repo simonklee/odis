@@ -907,7 +907,21 @@ class CollectionField(object):
         if not hasattr(instance, attr):
             setattr(instance, attr, self.name)
 
+        self.resolve_model()
         return getattr(instance, attr)
+
+    def resolve_model(self):
+        if not isinstance(self.model, str):
+            return
+
+        parts = self.model.split('.')
+        cls_name = parts.pop(len(parts) - 1)
+        mod = __import__('.'.join(parts))
+
+        for comp in parts[1:]:
+            mod = getattr(mod, comp)
+
+        self.model = getattr(mod, cls_name)
 
 class BaseSetField(CollectionField):
     def __get__(self, instance, owner):
@@ -1191,10 +1205,13 @@ class Model(object):
                     setattr(self, name, data[name])
         return self
 
-    def as_dict(self, to_db=False):
+    def as_dict(self, to_db=False, exclude=tuple()):
         data = {}
 
         for k, f in self._fields.items():
+            if k in exclude:
+                continue
+
             v = getattr(self, k)
 
             if to_db:
